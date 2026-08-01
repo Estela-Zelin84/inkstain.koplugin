@@ -37,6 +37,7 @@ This version has only been tested on Kindle Paperwhite 4 (KPW4). Other devices a
 - 🖼️ **PNG rendering**: Use KOReader's built-in text rendering widgets to generate PNG and avoid SVG text rendering issues
 
 ## 📸 Preview
+<img width="127.9" height="173.2" alt="d05635655f5600264d156ca0feb10392" src="https://github.com/user-attachments/assets/2e800a45-42d5-4df5-85f3-bfeb24fb904f" />
 
 The wallpaper uses a receipt-style layout with four main areas:
 
