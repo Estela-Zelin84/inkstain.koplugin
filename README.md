@@ -68,9 +68,3 @@ screensaver_document_cover = koreader/screensaver/readtrace_png/readtrace_wallpa
 ## 许可证
 
 本插件使用 GPL-3.0 许可证，版权归 `Estela-Zelin84` 所有。完整文本见 `LICENSE`。
-
-## 与原 ReadTrace 的差异
-
-原 ReadTrace 是面向 BOOX/NeoReader 的 Android 应用，支持 NeoReader、微信读书、封面墙和月历。这个 KOReader 插件是轻量离线版，只读取 KOReader 自己的阅读统计。
-
-如果后续需要做“当前阅读封面”或“月历封面墙”，建议在这个插件基础上继续扩展。
