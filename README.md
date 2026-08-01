@@ -1,4 +1,4 @@
-# 📖 KOReader 阅迹壁纸插件
+# 📖 KOReader 阅迹壁纸Plugin插件
 
 [![English](https://img.shields.io/badge/English-555555?style=for-the-badge&logo=github)](./README_en.md)
 [![简体中文](https://img.shields.io/badge/简体中文-12B7F5?style=for-the-badge&logo=github)](./README.md)
