@@ -1,10 +1,15 @@
---[[--
-KOReader 墨痕壁纸。
-
-本插件根据 KOReader 内置阅读统计数据库生成“墨痕小票”风格休眠壁纸。
-输出格式为 PNG，使用 KOReader 自己的文字渲染组件绘制，避免 SVG 文本不显示。
---]]--
-
+-- Ink Stain Wallpaper for KOReader
+--
+-- A KOReader plugin that generates Ink Stain style sleep screen wallpapers
+-- from KOReader reading statistics.
+--
+-- Visual inspiration: reading receipt / reading bill style
+-- Created by: Estela-Zelin84
+-- Design and implementation: Estela-Zelin84
+-- Repository: https://github.com/Estela-Zelin84/inkstain-koreader-plugin
+--
+-- Copyright (C) 2026 Estela-Zelin84
+-- SPDX-License-Identifier: GPL-3.0-or-later
 local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local Device = require("device")
