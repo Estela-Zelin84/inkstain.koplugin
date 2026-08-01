@@ -8,7 +8,7 @@
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
-> 让每一次休眠，都留下一张属于自己的阅读小票。
+> 让每一次休眠，都留下一张属于自己的阅读账单。
 
 **KOReader 阅迹壁纸** 是一个为 KOReader 定制的休眠屏幕壁纸插件。它会读取 KOReader 内置阅读统计数据库 `statistics.sqlite3`，生成一张 ReadTrace 风格的「阅读账单」PNG 壁纸，并可自动设置为 KOReader 的休眠屏幕图片。
 
