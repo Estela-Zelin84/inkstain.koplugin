@@ -37,7 +37,8 @@
 - 🖼️ **PNG 渲染输出**：使用 KOReader 自带文字渲染组件生成 PNG，避免 SVG 文字空白问题
 
 ## 📸 效果预览
-<img width="127.9" height="173.2" alt="d05635655f5600264d156ca0feb10392" src="https://github.com/user-attachments/assets/08c5b052-e4a5-4708-bda3-35efc5eed593" />
+<img width="394.2" height="536.4" alt="ca10bc4c66f48cfe482b8306ef07d855" src="https://github.com/user-attachments/assets/c29e762a-0f81-45e1-902e-14248c7fe56d" />
+
 
 壁纸采用收据 / 墨痕小票风格，主要包含四个区域：
 
