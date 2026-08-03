@@ -6,13 +6,14 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.0.0-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
-> 让每一次休眠，都留下一张属于自己的墨痕小票。
+> 让每一次休眠，都留下一张属于自己的墨痕账单。
 
-**KOReader 墨痕壁纸** 是一个为 KOReader 定制的休眠屏幕壁纸插件。它会读取 KOReader 内置阅读统计数据库 `statistics.sqlite3`，生成一张 Ink Stain 风格的「墨痕小票」PNG 壁纸，并可自动设置为 KOReader 的休眠屏幕图片。
+**KOReader 墨痕壁纸** 是一个为 KOReader 定制的休眠屏幕壁纸插件。它会读取 KOReader 内置阅读统计数据库 `statistics.sqlite3`，生成一张 Ink Stain 风格的「墨痕账单」PNG 壁纸，并可自动设置为 KOReader 的休眠屏幕图片。
 
-插件不依赖网络、不依赖外部命令，只读取 KOReader 本地阅读统计数据，适合 Kindle、Kobo、Android 墨水屏等运行 KOReader 的设备使用。
+插件支持读取 KOReader 原生阅读统计和觅阅（MiuRead）微信读书插件的书架数据，适合 Kindle、Kobo、Android 墨水屏等运行 KOReader 的设备使用。
 
 ## 💬 交流反馈
 
@@ -24,7 +25,8 @@
 
 ## ✨ 功能特性
 
-- 📊 **墨痕小票壁纸**：根据 KOReader 阅读统计生成收据 / 小票风格休眠壁纸
+- 📊 **墨痕账单壁纸**：根据阅读统计生成收据 / 账单风格休眠壁纸
+- 🔀 **多数据源支持**：可选 KOReader 阅读统计、觅阅书架或两者合并
 - ⏱️ **阅读时长统计**：显示本期累计阅读时长、日均阅读时长和合计时长
 - 📚 **Top 书单展示**：按本期阅读时长展示 Top 2 / Top 3 / Top 4 书籍
 - 📈 **每日趋势折线**：显示统计周期内每日阅读时长变化
@@ -33,14 +35,16 @@
 - 🧹 **旧图自动清理**：生成新壁纸时清理插件输出目录里的旧图片
 - 🛡️ **原生屏保保护**：启用前备份 KOReader 原生屏保设置，关闭后可恢复
 - 🏠 **使用范围控制**：可选择只在主页使用，避免干涉阅读界面的独立屏保设置
-- 🌐 **完全中文界面**：插件菜单、提示信息和生成壁纸内容均为中文
+- 🌐 **在线更新**：插件内一键检查 GitHub Release 新版本，支持下载并自动安装
+- 🌍 **GitHub 镜像加速**：内置三个镜像，国内设备下载不再超时
 - 🖼️ **PNG 渲染输出**：使用 KOReader 自带文字渲染组件生成 PNG，避免 SVG 文字空白问题
+- 🔤 **内嵌字体**：自带汇文明朝体，壁纸风格统一，不依赖用户字体设置
 
 ## 📸 效果预览
-<img width="394.2" height="536.4" alt="ca10bc4c66f48cfe482b8306ef07d855" src="https://github.com/user-attachments/assets/c29e762a-0f81-45e1-902e-14248c7fe56d" />
 
+<img width="127.9" height="173.2" alt="d05635655f5600264d156ca0feb10392" src="https://github.com/user-attachments/assets/08c5b052-e4a5-4708-bda3-35efc5eed593" />
 
-壁纸采用收据 / 墨痕小票风格，主要包含四个区域：
+壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
 - 页眉：单号、统计周期、数据来源、总时长、书单数量
 - 书单：最多显示 4 本书，包含作者、进度和本期阅读时长
@@ -49,7 +53,7 @@
 
 ## 🔧 使用方法
 
-1. 下载 release 中的 `inkstain-koreader-plugin.zip`
+1. 下载 release 中的 `inkstain.koplugin-v2.0.0.zip`
 2. 解压后，将 `inkstain.koplugin` 文件夹复制到 KOReader 的 `plugins` 目录
 3. 重启 KOReader
 4. 打开 KOReader 顶部菜单，在插件菜单位置找到「墨痕壁纸」
@@ -79,26 +83,38 @@
 | 锁屏使用范围 | 可选择只在主页使用，或主页和阅读界面都使用 |
 | 统计周期 | 支持今天、最近 7 天、最近 30 天 |
 | 书单数量 | 支持 Top 2、Top 3、Top 4 |
+| 数据源 | KOReader 阅读统计 / 觅阅书架 / 两者合并 |
 | 显示输出路径 | 查看当前壁纸输出位置 |
+| 检查更新 | 检查 GitHub Release 新版本并在线安装 |
 
 ## 📝 更新日志
+
+### v2.0.0（2026.08）
+
+- ✅ 新增多数据源支持：KOReader 阅读统计 / 觅阅书架 / 两者合并
+- ✅ 新增在线更新功能，支持 GitHub Release 检查、下载并自动安装
+- ✅ 新增 GitHub 镜像加速，内置三个镜像源
+- ✅ 新增下载三级回退（ssl.https / curl / wget）
+- ✅ 新增内嵌汇文明朝体字体，不依赖用户字体设置
+- ✅ 改进标题字号和底部布局
+- ✅ 修复字体加载闪退、版本号比较、解压模块等多个问题
 
 ### v1.0.0（2026.08）
 
 - ✅ 首个稳定版本
-- ✅ 新增 Ink Stain 风格墨痕小票壁纸生成
-- ✅ 新增 KOReader 阅读统计数据库读取
-- ✅ 新增今天 / 最近 7 天 / 最近 30 天统计周期
-- ✅ 新增 Top 书单、阅读进度、每日阅读趋势折线
-- ✅ 新增休眠前自动刷新
-- ✅ 新增旧图片自动清理
-- ✅ 新增原生屏保设置备份与恢复
-- ✅ 新增锁屏使用范围设置，支持只在主页使用
-- ✅ 新增 GPL-3.0 许可证
+- ✅ Ink Stain 风格墨痕账单壁纸生成
+- ✅ KOReader 阅读统计数据库读取
+- ✅ 今天 / 最近 7 天 / 最近 30 天统计周期
+- ✅ Top 书单、阅读进度、每日阅读趋势折线
+- ✅ 休眠前自动刷新、旧图片自动清理
+- ✅ 原生屏保设置备份与恢复
+- ✅ 锁屏使用范围设置
+- ✅ 简体中文、繁体中文（台湾、香港、澳门）、韩语本地化
 
 ## 🙏 致谢
 
-感谢 KOReader 项目提供阅读统计、插件系统和 PNG 渲染能力。
+- 感谢 [KOReader](https://github.com/koreader/koreader) 项目提供阅读统计、插件系统和 PNG 渲染能力
+- 感谢 [觅阅 MiuRead](https://github.com/miumiupy98-art) 作者 [@miumiupy98-art](https://github.com/miumiupy98-art)，多数据源功能参考了觅阅插件的数据存储结构
 
 ## 📄 许可证
 
