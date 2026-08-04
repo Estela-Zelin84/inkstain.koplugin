@@ -6,13 +6,14 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.0.0-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > Turn every sleep screen into a small imprint of your reading life.
 
 **KOReader Ink Stain Wallpaper** is a sleep screen wallpaper plugin for KOReader. It reads KOReader's built-in reading statistics database `statistics.sqlite3`, generates an Ink Stain-style reading imprint PNG wallpaper, and can automatically set it as the KOReader sleep screen image.
 
-The plugin does not require network access or external commands. It only reads local KOReader statistics, and is intended for Kindle, Kobo, Android e-ink devices, and other devices running KOReader.
+The plugin supports reading from KOReader's native reading statistics and the MiuRead (觅阅) WeRead plugin's shelf data. It is intended for Kindle, Kobo, Android e-ink devices, and other devices running KOReader.
 
 ## 💬 Feedback
 
@@ -24,7 +25,8 @@ This version has only been tested on Kindle Paperwhite 4 (KPW4). Other devices a
 
 ## ✨ Features
 
-- 📊 **Reading imprint wallpaper**: Generate ink-stain style sleep screen wallpapers from KOReader reading statistics
+- 📊 **Reading imprint wallpaper**: Generate ink-stain style sleep screen wallpapers from reading statistics
+- 🔀 **Multiple data sources**: Choose from KOReader statistics, MiuRead shelf, or both combined
 - ⏱️ **Reading time summary**: Show total reading time, average daily reading time, and period total
 - 📚 **Top books**: Display Top 2 / Top 3 / Top 4 books by reading time in the selected period
 - 📈 **Daily trend line**: Show daily reading time changes within the selected period
@@ -33,11 +35,14 @@ This version has only been tested on Kindle Paperwhite 4 (KPW4). Other devices a
 - 🧹 **Old image cleanup**: Clean old images in the plugin output directory when generating a new wallpaper
 - 🛡️ **Native screensaver protection**: Back up KOReader's original screensaver settings before enabling, and restore them when disabled
 - 🏠 **Scope control**: Use only on the home screen to avoid interfering with independent reader screensaver settings
-- 🌐 **Chinese UI**: Plugin menus, prompts, and generated wallpaper text are currently in Chinese
+- 🌐 **Online update**: Check for new GitHub releases and download/install updates directly within the plugin
+- 🌍 **GitHub mirror acceleration**: Built-in mirrors for faster downloads in regions with poor GitHub connectivity
 - 🖼️ **PNG rendering**: Use KOReader's built-in text rendering widgets to generate PNG and avoid SVG text rendering issues
+- 🔤 **Embedded font**: Bundled Huiwen Ming typeface for consistent wallpaper styling without depending on user font settings
 
 ## 📸 Preview
-<img width="127.9" height="173.2" alt="d05635655f5600264d156ca0feb10392" src="https://github.com/user-attachments/assets/2e800a45-42d5-4df5-85f3-bfeb24fb904f" />
+
+<img width="200" alt="Ink Stain wallpaper preview" src="./docs/preview.jpg" />
 
 The wallpaper uses an ink-stain style layout with four main areas:
 
@@ -48,7 +53,7 @@ The wallpaper uses an ink-stain style layout with four main areas:
 
 ## 🔧 Usage
 
-1. Download `inkstain-koreader-plugin.zip` from the release page
+1. Download `inkstain.koplugin-v2.0.0.zip` from the release page
 2. Unzip it and copy the `inkstain.koplugin` folder to KOReader's `plugins` directory
 3. Restart KOReader
 4. Open KOReader's top menu and find `墨痕壁纸` in the plugin menu
@@ -78,26 +83,38 @@ The plugin uses KOReader's single-image screensaver mode:
 | 锁屏使用范围 | Use only on the home screen, or both home and reader screens |
 | 统计周期 | Today, last 7 days, or last 30 days |
 | 书单数量 | Top 2, Top 3, or Top 4 |
+| 数据源 | KOReader statistics / MiuRead shelf / Both combined |
 | 显示输出路径 | Show the current wallpaper output path |
+| 检查更新 | Check for new GitHub releases and install updates online |
 
 ## 📝 Changelog
+
+### v2.0.0 (2026.08)
+
+- ✅ Added multiple data sources: KOReader statistics / MiuRead shelf / Both combined
+- ✅ Added online update with GitHub Release check, download, and auto-install
+- ✅ Added GitHub mirror acceleration with three mirror sources
+- ✅ Added download fallback chain (ssl.https / curl / wget)
+- ✅ Added embedded Huiwen Ming font, no longer depends on user font settings
+- ✅ Improved title font size and footer layout
+- ✅ Fixed font loading crash, version comparison, and unzip module issues
 
 ### v1.0.0 (2026.08)
 
 - ✅ Initial stable release
-- ✅ Added Ink Stain-style reading imprint wallpaper generation
-- ✅ Added KOReader reading statistics database support
-- ✅ Added today / last 7 days / last 30 days periods
-- ✅ Added Top books, reading progress, and daily reading trend line
-- ✅ Added auto refresh before suspend
-- ✅ Added old image cleanup
-- ✅ Added original screensaver settings backup and restore
-- ✅ Added scope control for home-screen-only usage
-- ✅ Added GPL-3.0 license
+- ✅ Ink Stain-style reading imprint wallpaper generation
+- ✅ KOReader reading statistics database support
+- ✅ Today / last 7 days / last 30 days periods
+- ✅ Top books, reading progress, and daily reading trend line
+- ✅ Auto refresh before suspend, old image cleanup
+- ✅ Original screensaver settings backup and restore
+- ✅ Scope control for home-screen-only usage
+- ✅ Simplified Chinese, Traditional Chinese (TW, HK, MO), Korean localization
 
 ## 🙏 Credits
 
-Thanks to the KOReader project for providing reading statistics, the plugin system, and PNG rendering capabilities.
+- Thanks to the [KOReader](https://github.com/koreader/koreader) project for providing reading statistics, the plugin system, and PNG rendering capabilities
+- Thanks to [MiuRead](https://github.com/miumiupy98-art) author [@miumiupy98-art](https://github.com/miumiupy98-art) — the multi-data-source feature references MiuRead's data storage structure
 
 ## 📄 License
 
