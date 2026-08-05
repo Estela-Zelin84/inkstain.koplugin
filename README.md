@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-2.0.0-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.0.7-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > 让每一次休眠，都留下一张属于自己的墨痕账单。
@@ -28,17 +28,18 @@
 - 📊 **墨痕账单壁纸**：根据阅读统计生成收据 / 账单风格休眠壁纸
 - 🔀 **多数据源支持**：可选 KOReader 阅读统计、觅阅书架或两者合并
 - ⏱️ **阅读时长统计**：显示本期累计阅读时长、日均阅读时长和合计时长
-- 📚 **Top 书单展示**：按本期阅读时长展示 Top 2 / Top 3 / Top 4 书籍
+- 📚 **Top 书单展示**：按本期阅读时长展示 Top 2 / Top 3 / Top 4 / Top 5 书籍
 - 📈 **每日趋势折线**：显示统计周期内每日阅读时长变化
 - 🧾 **小票风格排版**：包含单号、统计周期、来源、条码和底部署名
 - 🔄 **休眠前自动刷新**：当前正在使用墨痕壁纸时，休眠前自动重新生成
 - 🧹 **旧图自动清理**：生成新壁纸时清理插件输出目录里的旧图片
 - 🛡️ **原生屏保保护**：启用前备份 KOReader 原生屏保设置，关闭后可恢复
 - 🏠 **使用范围控制**：可选择只在主页使用，避免干涉阅读界面的独立屏保设置
+- 🔤 **自定义壁纸字体**：支持在菜单中指定系统中已安装的字体文件名，也可随时切回内置字体
 - 🌐 **在线更新**：插件内一键检查 GitHub Release 新版本，支持下载并自动安装
 - 🌍 **GitHub 镜像加速**：内置三个镜像，国内设备下载不再超时
 - 🖼️ **PNG 渲染输出**：使用 KOReader 自带文字渲染组件生成 PNG，避免 SVG 文字空白问题
-- 🔤 **内嵌字体**：自带汇文明朝体，壁纸风格统一，不依赖用户字体设置
+- 📦 **内嵌字体**：自带汇文明朝体，壁纸风格统一，不依赖用户字体设置
 
 ## 📸 效果预览
 
@@ -47,13 +48,13 @@
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
 - 页眉：单号、统计周期、数据来源、总时长、书单数量
-- 书单：最多显示 4 本书，包含作者、进度和本期阅读时长
+- 书单：最多显示 5 本书，包含作者、进度和本期阅读时长
 - 图表：显示每日阅读趋势折线
 - 底部：二维码、Code128 风格条码、随机格言和 `Design by Estela-Zelin84` 署名
 
 ## 🔧 使用方法
 
-1. 下载 release 中的 `inkstain.koplugin-v2.0.0.zip`
+1. 下载 release 中的 `inkstain.koplugin-v2.0.7.zip`
 2. 解压后，将 `inkstain.koplugin` 文件夹复制到 KOReader 的 `plugins` 目录
 3. 重启 KOReader
 4. 打开 KOReader 顶部菜单，在插件菜单位置找到「墨痕壁纸」
@@ -82,28 +83,46 @@
 | 自动设置 KOReader 休眠屏幕 | 生成后自动设置为休眠壁纸 |
 | 锁屏使用范围 | 可选择只在主页使用，或主页和阅读界面都使用 |
 | 统计周期 | 支持今天、最近 7 天、最近 30 天 |
-| 书单数量 | 支持 Top 2、Top 3、Top 4 |
+| 书单数量 | 支持 Top 2、Top 3、Top 4、Top 5 |
 | 数据源 | KOReader 阅读统计 / 觅阅书架 / 两者合并 |
+| 壁纸字体 | 手动指定字体文件名（如 `NotoSansCJKsc-Regular.otf`），留空则恢复内置字体 |
 | 显示输出路径 | 查看当前壁纸输出位置 |
 | 检查更新 | 检查 GitHub Release 新版本并在线安装 |
 
 ## 📝 更新日志
 
+### v2.0.7（2026.08）
+
+- 🆕 新增自定义壁纸字体功能，可在菜单中设置任意已安装字体
+- 🐛 修复字体加载崩溃问题，增加回退机制
+- 🌐 优化在线更新：内置 GitHub 镜像加速，支持多级下载回退（Lua HTTP / curl / wget）
+- 📚 书单数量新增 Top 5 选项
+- 🧹 改进更新包完整性校验（SHA256）
+- 🛠️ 优化壁纸布局，调整标题及底部样式
+- 📝 完善错误提示和日志输出
+
 ### v2.0.0（2026.08）
-
-- ✅ 新增多数据源支持：KOReader 阅读统计 / 觅阅书架 / 两者合并
-- ✅ 新增在线更新功能，支持 GitHub Release 检查、下载并自动安装
-- ✅ 新增 GitHub 镜像加速，内置三个镜像源
-- ✅ 新增下载三级回退（ssl.https / curl / wget）
-- ✅ 新增内嵌汇文明朝体字体，不依赖用户字体设置
-- ✅ 改进标题字号和底部布局
-- ✅ 修复字体加载闪退、版本号比较、解压模块等多个问题
-
-### v1.0.0（2026.08）
 
 - ✅ 首个稳定版本
 - ✅ Ink Stain 风格墨痕账单壁纸生成
 - ✅ KOReader 阅读统计数据库读取
+- ✅ 今天 / 最近 7 天 / 最近 30 天统计周期
+- ✅ Top 书单、阅读进度、每日阅读趋势折线
+- ✅ 休眠前自动刷新、旧图片自动清理
+- ✅ 原生屏保设置备份与恢复
+- ✅ 锁屏使用范围设置
+- ✅ 简体中文、繁体中文（台湾、香港、澳门）、韩语本地化
+
+## 🙏 致谢
+
+- 感谢 [KOReader](https://github.com/koreader/koreader) 项目提供阅读统计、插件系统和 PNG 渲染能力
+- 感谢 [觅阅 MiuRead](https://github.com/miumiupy98-art) 作者 [@miumiupy98-art](https://github.com/miumiupy98-art)，多数据源功能参考了觅阅插件的数据存储结构
+
+## 📄 许可证
+
+GNU General Public License v3.0
+
+Copyright (C) 2026 Estela-Zelin84- ✅ KOReader 阅读统计数据库读取
 - ✅ 今天 / 最近 7 天 / 最近 30 天统计周期
 - ✅ Top 书单、阅读进度、每日阅读趋势折线
 - ✅ 休眠前自动刷新、旧图片自动清理
