@@ -1,0 +1,125 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: inkstain.koplugin 2.1.0\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+
+# Wallpaper title
+msgid "title_cn1"
+msgstr "Ink"
+
+msgid "title_cn2"
+msgstr "Stain"
+
+msgid "title_en"
+msgstr "reading receipt"
+
+# Header labels
+msgid "serial"
+msgstr "No. "
+
+msgid "period"
+msgstr "Date: "
+
+msgid "device_source"
+msgstr "Device: KOReader    Source: "
+
+msgid "duration"
+msgstr "Total: "
+
+msgid "top_books"
+msgstr "List: Top "
+
+# Table headers
+msgid "col_category"
+msgstr "Title"
+
+msgid "col_qty"
+msgstr "Qty"
+
+msgid "col_unit"
+msgstr "Unit"
+
+# Book row labels
+msgid "author"
+msgstr "Author: "
+
+msgid "progress"
+msgstr "Progress: "
+
+msgid "period_time"
+msgstr "  Period: "
+
+msgid "unit_book"
+msgstr "ea"
+
+# Omission notice
+msgid "omitted"
+msgstr " more omitted (screen height)"
+
+msgid "omitted_prefix"
+msgstr ""
+
+# Chart labels
+msgid "daily_avg"
+msgstr "Daily avg: "
+
+msgid "total"
+msgstr "Total: "
+
+msgid "min_suffix"
+msgstr "m"
+
+# Error messages
+msgid "err_read"
+msgstr "Failed to read stats: "
+
+msgid "err_no_db"
+msgstr "KOReader statistics DB not found. Please enable Reading Statistics."
+
+msgid "err_empty"
+msgstr "No reading records in this period."
+
+# Data source labels
+msgid "source_koreader"
+msgstr "Statistics"
+
+msgid "source_miuread"
+msgstr "MiuRead"
+
+msgid "source_both"
+msgstr "KOReader + MiuRead"
+
+# Duration format
+msgid "hr"
+msgstr "h "
+
+msgid "min"
+msgstr "m"
+
+# Quotes
+msgid "quote_1"
+msgstr "A reader lives a thousand lives before he dies."
+
+msgid "quote_2"
+msgstr "Books are a uniquely portable magic."
+
+msgid "quote_3"
+msgstr "The more that you read, the more things you will know."
+
+msgid "quote_4"
+msgstr "Reading is to the mind what exercise is to the body."
+
+msgid "quote_5"
+msgstr "A book is a dream that you hold in your hand."
+
+msgid "quote_6"
+msgstr "Today a reader, tomorrow a leader."
+
+msgid "quote_7"
+msgstr "Books let us travel without moving our feet."
+
+msgid "quote_8"
+msgstr "Reading is conversation across centuries."

@@ -1,0 +1,125 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: inkstain.koplugin 2.1.0\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+
+# 壁纸标题
+msgid "title_cn1"
+msgstr "墨"
+
+msgid "title_cn2"
+msgstr "痕"
+
+msgid "title_en"
+msgstr "ink stain"
+
+# 页眉标签
+msgid "serial"
+msgstr "单号："
+
+msgid "period"
+msgstr "时间："
+
+msgid "device_source"
+msgstr "设备：KOReader    来源："
+
+msgid "duration"
+msgstr "时长："
+
+msgid "top_books"
+msgstr "书单：Top "
+
+# 表头
+msgid "col_category"
+msgstr "品类"
+
+msgid "col_qty"
+msgstr "数量"
+
+msgid "col_unit"
+msgstr "单位"
+
+# 书籍行标签
+msgid "author"
+msgstr "作者："
+
+msgid "progress"
+msgstr "进度："
+
+msgid "period_time"
+msgstr "  本期："
+
+msgid "unit_book"
+msgstr "本"
+
+# 省略提示
+msgid "omitted"
+msgstr " 本因屏幕高度省略"
+
+msgid "omitted_prefix"
+msgstr "另有 "
+
+# 图表标签
+msgid "daily_avg"
+msgstr "日均："
+
+msgid "total"
+msgstr "合计："
+
+msgid "min_suffix"
+msgstr "分"
+
+# 错误信息
+msgid "err_read"
+msgstr "读取统计失败："
+
+msgid "err_no_db"
+msgstr "未找到 KOReader 阅读统计数据库，请先启用\"阅读统计\"。"
+
+msgid "err_empty"
+msgstr "本周期暂无可显示的阅读记录。"
+
+# 数据来源标签
+msgid "source_koreader"
+msgstr "阅读统计"
+
+msgid "source_miuread"
+msgstr "觅阅"
+
+msgid "source_both"
+msgstr "KOReader + 觅阅"
+
+# 时长格式
+msgid "hr"
+msgstr "小时"
+
+msgid "min"
+msgstr "分钟"
+
+# 格言
+msgid "quote_1"
+msgstr "书卷多情似故人，晨昏忧乐每相亲。"
+
+msgid "quote_2"
+msgstr "读书不觉已春深，一寸光阴一寸金。"
+
+msgid "quote_3"
+msgstr "纸上得来终觉浅，绝知此事要躬行。"
+
+msgid "quote_4"
+msgstr "我本愿将心向明月，奈何明月照沟渠。"
+
+msgid "quote_5"
+msgstr "黑发不知勤学早，白首方悔读书迟。"
+
+msgid "quote_6"
+msgstr "粗缯大布裹生涯，腹有诗书气自华。"
+
+msgid "quote_7"
+msgstr "灯火纸窗修竹里，读书声。"
+
+msgid "quote_8"
+msgstr "读万卷书，行万里路。"
