@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-2.0.9-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.1.0-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > 让每一次休眠，都留下一张属于自己的墨痕账单。
@@ -41,6 +41,9 @@
 - 🖼️ **PNG 渲染输出**：使用 KOReader 自带文字渲染组件生成 PNG，避免 SVG 文字空白问题
 - 🔤 **内嵌字体**：自带汇文明朝体，壁纸风格统一，不依赖用户字体设置
 - 🔤 **自定义字体**：可手动输入系统字体文件名，替换壁纸渲染字体
+- 📐 **进度模式**：可选总进度（全期阅读位置）或本期进度（本期阅读页数占比）
+- 🌐 **壁纸语言**：支持中文和英文壁纸渲染，独立于 KOReader UI 语言
+- 📦 **.po 语言包**：采用标准 gettext .po 文本文件，纯 Lua 运行时解析，无需编译
 
 ## 📸 效果预览
 
@@ -55,7 +58,7 @@
 
 ## 🔧 使用方法
 
-1. 下载 release 中的 `inkstain.koplugin-v2.0.9.zip`
+1. 下载 release 中的 `inkstain.koplugin-v2.1.0.zip`
 2. 解压后，将 `inkstain.koplugin` 文件夹复制到 KOReader 的 `plugins` 目录
 3. 重启 KOReader
 4. 打开 KOReader 顶部菜单，在插件菜单位置找到「墨痕壁纸」
@@ -94,10 +97,72 @@
 
 ## 📝 更新日志
 
+### v2.1.0（2026.08）
+
+- ✅ 修复切换壁纸语言后生成壁纸闪退（`pickQuote` 参数错误）
+- ✅ 重构壁纸本地化为 .po 语言包系统（仿 ZenUI 插件方案）
+- ✅ 新增 `locales/zh.po` 和 `locales/en.po`，纯文本 .po 文件，无需编译
+- ✅ 新增 `i18n.lua` 模块：运行时纯 Lua 解析 .po，带缓存和回退
+- ✅ 移除硬编码 `WALLPAPER_I18N` 对照表，所有壁纸文本由 .po 文件驱动
+
 ### v2.0.9（2026.08）
 
 - ✅ 新增壁纸语言切换：设置中可选中文或英文壁纸渲染
 - ✅ 英文版壁纸包含全英文标题、标签、格言和错误提示
+- ✅ 英文标题样式：Ink Stain + reading receipt 副标题
+
+### v2.0.8（2026.08）
+
+- ✅ 新增进度模式切换：可在设置中选择「总进度」（全期阅读位置）或「本期进度」（本期阅读页数占比）
+- ✅ 修复进度显示错误：用全期最大阅读页（MAX(page)）计算总进度，替代本期阅读页数
+- ✅ 修复"两者合并"模式下觅阅进度未生效的问题：始终优先使用觅阅 progress_local_percent
+- ✅ 修复时间格式化潜在问题：增加 60 分钟进位保护
+
+### v2.0.7（2026.08）
+
+- ✅ 新增壁纸字体自定义功能：输入字体文件名即可切换
+- ✅ 彻底修复字体选择闪退：改为文本输入，不再扫描字体目录
+- ✅ 修复觅阅数据源不显示记录的问题：复用 KOReader 统计查询，觅阅仅补充进度
+- ✅ 修复两者合并模式下进度全部显示 0% 的问题
+- ✅ Top 5 书单支持，最大展示书籍数从 4 本提升至 5 本
+- ✅ OTA 加入 SHA256 哈希验证，防止文件损坏或篡改
+- ✅ 重写 OTA 网络层，手动处理 HTTP 重定向，修复部分设备闪退
+- ✅ 标题排版优化：「墨」与「痕」等大，「ink stain」左对齐垫于「痕」下方
+- ✅ 仿照觅阅插件 OTA 方法，优化下载速度
+
+### v2.0.0（2026.08）
+
+- ✅ 新增多数据源支持：KOReader 阅读统计 / 觅阅书架 / 两者合并
+- ✅ 新增在线更新功能，支持 GitHub Release 检查、下载并自动安装
+- ✅ 新增 GitHub 镜像加速，内置三个镜像源
+- ✅ 新增下载三级回退（ssl.https / curl / wget）
+- ✅ 新增内嵌汇文明朝体字体，不依赖用户字体设置
+- ✅ 改进标题字号和底部布局
+- ✅ 修复字体加载闪退、版本号比较、解压模块等多个问题
+
+### v1.0.0（2026.08）
+
+- ✅ 首个稳定版本
+- ✅ Ink Stain 风格墨痕账单壁纸生成
+- ✅ KOReader 阅读统计数据库读取
+- ✅ 今天 / 最近 7 天 / 最近 30 天统计周期
+- ✅ Top 书单、阅读进度、每日阅读趋势折线
+- ✅ 休眠前自动刷新、旧图片自动清理
+- ✅ 原生屏保设置备份与恢复
+- ✅ 锁屏使用范围设置
+- ✅ 简体中文、繁体中文（台湾、香港、澳门）、韩语本地化
+
+## 🙏 致谢
+
+- 感谢 [KOReader](https://github.com/koreader/koreader) 项目提供阅读统计、插件系统和 PNG 渲染能力
+- 感谢 [觅阅 MiuRead](https://github.com/miumiupy98-art/miuread-koreader) 作者 [@miumiupy98-art](https://github.com/miumiupy98-art)，多数据源功能和 OTA 方法参考了觅阅插件的实现
+- 感谢 [ZenUI](https://github.com/AnthonyGress/zen_ui.koplugin) 插件，.po 语言包方案参考了 ZenUI 的 i18n 实现
+
+## 📄 许可证
+
+GNU General Public License v3.0
+
+Copyright (C) 2026 Estela-Zelin84
 - ✅ 英文标题样式：Ink Stain + reading receipt 副标题
 
 ### v2.0.8（2026.08）
