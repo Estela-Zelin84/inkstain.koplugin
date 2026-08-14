@@ -47,7 +47,8 @@
 
 ## 📸 效果预览
 
-<img width="200" alt="墨痕账单预览" src="./docs/preview.jpg" />
+<img width="417.8" height="579" alt="图片1" src="https://github.com/user-attachments/assets/9fe03773-086d-4fbe-8f88-b927042ed729" />
+<img width="368.6" height="505.2" alt="图片2" src="https://github.com/user-attachments/assets/70fb205a-d721-4fc0-930a-7f27b734a2df" />
 
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
