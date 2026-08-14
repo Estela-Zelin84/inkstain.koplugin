@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-2.0.9-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.1.0-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > Turn every sleep screen into a small imprint of your reading life.
@@ -41,10 +41,13 @@ This version has only been tested on Kindle Paperwhite 4 (KPW4). Other devices a
 - 🖼️ **PNG rendering**: Use KOReader's built-in text rendering widgets to generate PNG
 - 🔤 **Embedded font**: Includes Huiwen Ming typeface for consistent wallpaper styling
 - 🔤 **Custom font**: Enter a system font filename to customize the wallpaper rendering font
+- 📐 **Progress mode**: Choose total progress (all-time reading position) or period progress (pages read this period)
+- 🌐 **Wallpaper language**: Chinese or English wallpaper rendering, independent from KOReader UI language
+- 📦 **.po language packs**: Standard gettext .po text files, pure Lua runtime parsing, no compilation needed
 
 ## 📸 Preview
-
-<img width="200" alt="Ink Stain preview" src="./docs/preview.jpg" />
+<img width="417.8" height="579" alt="图片1" src="https://github.com/user-attachments/assets/9fe03773-086d-4fbe-8f88-b927042ed729" />
+<img width="368.6" height="505.2" alt="图片2" src="https://github.com/user-attachments/assets/70fb205a-d721-4fc0-930a-7f27b734a2df" />
 
 The wallpaper uses an ink-stain style layout with four main areas:
 
@@ -55,7 +58,7 @@ The wallpaper uses an ink-stain style layout with four main areas:
 
 ## 🔧 Usage
 
-1. Download `inkstain.koplugin-v2.0.9.zip` from the release page
+1. Download `inkstain.koplugin-v2.1.0.zip` from the release page
 2. Unzip it and copy the `inkstain.koplugin` folder to KOReader's `plugins` directory
 3. Restart KOReader
 4. Open KOReader's top menu and find `墨痕壁纸` in the plugin menu
@@ -93,6 +96,14 @@ The plugin uses KOReader's single-image screensaver mode:
 | 检查更新 | Check for new GitHub Release versions and install |
 
 ## 📝 Changelog
+
+### v2.1.0 (2026.08)
+
+- ✅ Fixed crash when generating wallpaper after switching wallpaper language (`pickQuote` parameter error)
+- ✅ Refactored wallpaper localization to .po language pack system (modeled after ZenUI plugin)
+- ✅ Added `locales/zh.po` and `locales/en.po`, plain text .po files, no compilation needed
+- ✅ Added `i18n.lua` module: pure Lua .po parser with caching and fallback
+- ✅ Removed hardcoded `WALLPAPER_I18N` table, all wallpaper text now driven by .po files
 
 ### v2.0.9 (2026.08)
 
@@ -145,6 +156,7 @@ The plugin uses KOReader's single-image screensaver mode:
 
 - Thanks to [KOReader](https://github.com/koreader/koreader) for reading statistics, plugin system, and PNG rendering
 - Thanks to [MiuRead](https://github.com/miumiupy98-art/miuread-koreader) author [@miumiupy98-art](https://github.com/miumiupy98-art), data source and OTA implementation referenced from MiuRead plugin
+- Thanks to [ZenUI](https://github.com/AnthonyGress/zen_ui.koplugin), the .po language pack implementation references ZenUI's i18n approach
 
 ## 📄 License
 
