@@ -1,4 +1,4 @@
-# 📖 KOReader 墨痕壁纸
+<img width="1846" height="2570" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/8bf9d7d2-80fe-4b31-bbfd-50b3ed991604" /># 📖 KOReader 墨痕壁纸
 
 [![English](https://img.shields.io/badge/English-555555?style=for-the-badge&logo=github)](./README_en.md)
 [![简体中文](https://img.shields.io/badge/简体中文-12B7F5?style=for-the-badge&logo=github)](./README.md)
@@ -47,8 +47,7 @@
 
 ## 📸 效果预览
 
-<img width="552.9" height="757.8" alt="636089544-70fb205a-d721-4fc0-930a-7f27b734a2df" src="https://github.com/user-attachments/assets/45fec9ab-2b83-4bdf-ae89-9b90a9ac61cf" />
-<img width="626.7" height="868.5" alt="636089545-9fe03773-086d-4fbe-8f88-b927042ed729" src="https://github.com/user-attachments/assets/91d19d9e-a0d3-4461-938c-2ee38e763ee4" />
+<img width="369.2" height="514" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/64b65b91-c531-4ce1-a43b-e29d29b0e620" />
 
 
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
