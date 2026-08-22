@@ -28,7 +28,7 @@ local T = ffiutil.template
 local i18n = require("i18n")
 
 local Updater = require("updater")
-local PLUGIN_VERSION = "3.0.2"
+local PLUGIN_VERSION = "3.1.0"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -48,6 +48,9 @@ local DEFAULT_SETTINGS = {
     font_name = "",  -- 空字符串表示使用内置字体
     progress_mode = "total",  -- "total" 总进度 / "period" 本期进度
     wallpaper_lang = "zh",  -- "zh" 中文 / "en" 英文
+    show_stains = false,  -- 墨水污渍效果（默认关闭，防止低性能设备卡顿）
+    bg_mode = "white",  -- "white" 白底 / "image" 自定义图片
+    bg_image_path = "",  -- 自定义背景图片路径
 }
 
 local SCREENSAVER_SETTING_KEYS = {
@@ -325,10 +328,17 @@ function InkStain:readMiureadProgress()
     local function getProgress(session, row)
         session = type(session) == "table" and session or {}
         row = type(row) == "table" and row or {}
+        -- 与觅阅 local_progress 逻辑一致，优先级从高到低：
+        -- pending.percent > progress_local_percent > verified_local_percent
+        --  > progress_upload_percent > progress_remote_percent > row.progress
         local pending = type(session.pending) == "table" and session.pending or {}
+        local pending_progress = type(session.pending_progress) == "table" and session.pending_progress or {}
         local p = tonumber(pending.percent
+            or pending_progress.percent
             or session.progress_local_percent
             or session.verified_local_percent
+            or session.progress_upload_percent
+            or session.progress_remote_percent
             or row.progress or 0) or 0
         return p
     end
@@ -575,6 +585,7 @@ function InkStain:readStats()
         local miuread_data = self:readMiureadProgress()
         result.has_miuread = miuread_data.has_miuread
 
+        local matched = 0
         if source == "miuread" then
             -- 觅阅数据源：KOReader 统计提供基础数据（书单/时长/页数），觅阅提供进度
             result.data_source_key = "miuread"
@@ -583,6 +594,7 @@ function InkStain:readStats()
                 if found and found > 0 then
                     b.progress = found
                     b.source = "miuread"
+                    matched = matched + 1
                 end
             end
         elseif source == "both" then
@@ -593,9 +605,11 @@ function InkStain:readStats()
                 local found = matchProgress(miuread_data, b.title)
                 if found and found > 0 then
                     b.progress = found
+                    matched = matched + 1
                 end
             end
         end
+        logger.info("墨痕壁纸：觅阅进度匹配", matched, "/", #result.books, "本")
     else
         result.data_source_key = "koreader"
     end
@@ -713,6 +727,116 @@ local function drawFrame(bb, x, y, w, h, width, color)
     drawRect(bb, x, y + h - width, w, width, color)
     drawRect(bb, x, y, width, h, color)
     drawRect(bb, x + w - width, y, width, h, color)
+end
+
+-- 伪随机数生成器（基于种子，保证同一天污渍一致）
+local function seededRandom(seed)
+    local state = seed % 2147483647
+    if state <= 0 then state = state + 2147483646 end
+    return function()
+        state = (state * 16807) % 2147483647
+        return (state - 1) / 2147483646
+    end
+end
+
+-- 墨水污渍效果（墨点聚集版）
+-- 用大量小墨点聚集形成自然的污渍形态，全部是 1-3px 小方块，性能好
+local function drawInkStains(bb, w, h, seed, intensity)
+    intensity = intensity or 1.0
+    local rand = seededRandom(seed)
+    local scale = math.min(w / 600, h / 800) * intensity
+
+    -- 在指定区域内生成一团墨点
+    local function makeStainCluster(cx, cy, radius, density)
+        for i = 1, density do
+            -- 极坐标随机分布，越靠近中心越密集
+            local angle = rand() * math.pi * 2
+            local r_norm = rand()
+            -- 用平方根让点更集中在中心（高斯近似）
+            local dist = math.sqrt(r_norm) * radius
+            local px = cx + math.cos(angle) * dist
+            local py = cy + math.sin(angle) * dist
+
+            -- 点的大小：中心大，边缘小
+            local size_factor = 1 - dist / radius
+            local size = 1
+            if size_factor > 0.7 then
+                size = 2 + math.floor(rand() * 2) -- 2-3px
+            elseif size_factor > 0.4 then
+                size = 1 + math.floor(rand() * 2) -- 1-2px
+            else
+                size = 1
+            end
+            size = math.max(1, math.floor(size * scale))
+
+            if px >= 0 and px < w and py >= 0 and py < h then
+                drawRect(bb, px, py, size, size, Blitbuffer.COLOR_BLACK)
+            end
+        end
+    end
+
+    -- 4-5 个主要污渍团
+    local stain_count = 4 + math.floor(rand() * 2)
+    for s = 1, stain_count do
+        local cx, cy
+        local region = math.floor(rand() * 6)
+        if region == 0 then
+            cx = rand() * w * 0.18
+            cy = rand() * h * 0.12
+        elseif region == 1 then
+            cx = w * 0.82 + rand() * w * 0.18
+            cy = rand() * h * 0.15
+        elseif region == 2 then
+            cx = rand() * w * 0.15
+            cy = h * 0.78 + rand() * h * 0.22
+        elseif region == 3 then
+            cx = w * 0.82 + rand() * w * 0.18
+            cy = h * 0.72 + rand() * h * 0.28
+        elseif region == 4 then
+            cx = rand() * w * 0.05
+            cy = h * 0.35 + rand() * h * 0.3
+        else
+            cx = w * 0.95 + rand() * w * 0.05
+            cy = h * 0.3 + rand() * h * 0.4
+        end
+
+        local radius = math.max(10, (25 + rand() * 35) * scale)
+        local density = math.floor(80 + rand() * 80) -- 每团 80-160 个点
+        makeStainCluster(cx, cy, radius, density)
+
+        -- 每团旁边加 2-3 个小副团
+        local sub_clusters = 2 + math.floor(rand() * 2)
+        for sc = 1, sub_clusters do
+            local angle = rand() * math.pi * 2
+            local dist = radius * (0.9 + rand() * 1.3)
+            local scx = cx + math.cos(angle) * dist
+            local scy = cy + math.sin(angle) * dist
+            local sr = radius * (0.25 + rand() * 0.35)
+            local sd = math.floor(20 + rand() * 25)
+            makeStainCluster(scx, scy, sr, sd)
+        end
+
+        -- 飞溅小点（更远更散）
+        local splash = 15 + math.floor(rand() * 15)
+        for sp = 1, splash do
+            local angle = rand() * math.pi * 2
+            local dist = radius * (1.3 + rand() * 2.2)
+            local sx = cx + math.cos(angle) * dist
+            local sy = cy + math.sin(angle) * dist
+            local ss = math.max(1, math.floor(rand() * 2 + 0.5))
+            if sx >= 0 and sx < w and sy >= 0 and sy < h then
+                drawRect(bb, sx, sy, ss, ss, Blitbuffer.COLOR_BLACK)
+            end
+        end
+    end
+
+    -- 全图稀疏散点
+    local dust = 30 + math.floor(rand() * 30)
+    for d = 1, dust do
+        local dx = rand() * w
+        local dy = rand() * h
+        drawRect(bb, dx, dy, 1, 1, Blitbuffer.COLOR_BLACK)
+    end
 end
 
 local function drawPseudoQR(bb, x, y, size, seed)
@@ -868,6 +992,39 @@ function InkStain:buildPng(stats)
 
     local bb = Blitbuffer.new(w, h, Screen.bb:getType())
     bb:fill(Blitbuffer.COLOR_WHITE)
+
+    -- 自定义背景图片
+    local bg_mode = self.settings.bg_mode or "white"
+    if bg_mode == "image" and self.settings.bg_image_path and self.settings.bg_image_path ~= "" then
+        local bg_path = self.settings.bg_image_path
+        if lfs.attributes(bg_path, "mode") == "file" then
+            -- cover 模式：等比例缩放填满屏幕，居中裁剪
+            local ok, img_bb = pcall(RenderImage.renderImageFile, RenderImage, bg_path, false, w, h)
+            if ok and img_bb then
+                local iw = img_bb:getWidth()
+                local ih = img_bb:getHeight()
+                local scale = math.max(w / iw, h / ih)
+                local draw_w = math.floor(iw * scale)
+                local draw_h = math.floor(ih * scale)
+                local draw_x = math.floor((w - draw_w) / 2)
+                local draw_y = math.floor((h - draw_h) / 2)
+                -- 重新按目标尺寸缩放
+                if img_bb.free then img_bb:free() end
+                local ok2, scaled_bb = pcall(RenderImage.renderImageFile, RenderImage, bg_path, false, draw_w, draw_h)
+                if ok2 and scaled_bb then
+                    pcall(bb.blitFrom, bb, scaled_bb, draw_x, draw_y, 0, 0, math.min(draw_w, w - draw_x), math.min(draw_h, h - draw_y))
+                    if scaled_bb.free then scaled_bb:free() end
+                end
+            end
+        end
+    end
+
+    -- 墨水污渍效果
+    if self.settings.show_stains then
+        -- 用日期作为种子，同一天的污渍一致
+        local stain_seed = os.date("%Y%m%d") + (stats.total_seconds or 0) % 1000
+        drawInkStains(bb, w, h, stain_seed, 1.0)
+    end
 
     local lang = self.settings.wallpaper_lang or "zh"
     local T = i18n.loadLang(self.path, lang)
@@ -1222,57 +1379,84 @@ function InkStain:setTopN(top_n)
     self:saveSettings()
 end
 
---- 设置自定义壁纸字体（弹出输入框，用户输入字体文件名）
+--- 设置自定义壁纸字体（文件选择器）
 function InkStain:setCustomFont()
-    local current = self.settings.font_name or ""
-    local hint = _("输入字体文件名（如 NotoSansCJKsc-Regular.otf）\n留空则使用内置汇文明朝体。\n字体文件需位于 KOReader 字体目录中。")
-    local dialog
-    dialog = InputDialog:new{
-        title = _("壁纸字体"),
-        input = current,
-        input_hint = hint,
-        description = _("当前：") .. (current ~= "" and current or _("内置字体")),
-        buttons = {{
-            {
-                text = _("取消"),
-                callback = function()
-                    UIManager:close(dialog)
-                end,
-            },
-            {
-                text = _("内置字体"),
-                callback = function()
-                    self.settings.font_name = ""
+    local PathChooser = require("ui/widget/pathchooser")
+    -- 默认从 KOReader 字体目录开始
+    local start_dir = FontList.fontdir or "/"
+    if self.settings.font_name and self.settings.font_name ~= "" then
+        -- 如果已有字体，尝试找到它的目录
+        local font_file = FontList.fontdir .. "/" .. self.settings.font_name
+        if lfs.attributes(font_file, "mode") == "file" then
+            start_dir = FontList.fontdir
+        end
+    end
+
+    local path_chooser = PathChooser:new{
+        title = _("选择字体文件"),
+        select_file = true,
+        select_directory = false,
+        show_files = true,
+        detailed_file_info = true,
+        path = start_dir,
+        file_filter = function(filename)
+            local lower = filename:lower()
+            return lower:match("%.ttf$") or lower:match("%.otf$") or lower:match("%.ttc$")
+        end,
+        onConfirm = function(path)
+            if path and lfs.attributes(path, "mode") == "file" then
+                local basename = path:match("([^/]+)$") or path
+                -- 尝试加载验证
+                local ok_face, _ = pcall(Font.getFace, Font, basename, 24)
+                if not ok_face then
+                    -- 如果文件名加载失败，试试完整路径
+                    ok_face, _ = pcall(Font.getFace, Font, path, 24)
+                end
+                if ok_face then
+                    self.settings.font_name = basename
                     self:saveSettings()
-                    UIManager:close(dialog)
-                    UIManager:show(InfoMessage:new{ text = _("已切换为内置字体。"), timeout = 3 })
-                end,
-            },
-            {
-                text = _("确认"),
-                is_enter_default = true,
-                callback = function()
-                    local text = dialog:getInputText()
-                    text = text and text:gsub("^%s+", ""):gsub("%s+$", "") or ""
-                    if text == "" then
-                        self.settings.font_name = ""
-                        self:saveSettings()
-                        UIManager:close(dialog)
-                        UIManager:show(InfoMessage:new{ text = _("已切换为内置字体。"), timeout = 3 })
-                    else
-                        -- 提取文件名（防止用户输入了完整路径）
-                        local basename = text:match("([^/]+)$") or text
-                        self.settings.font_name = basename
-                        self:saveSettings()
-                        UIManager:close(dialog)
-                        UIManager:show(InfoMessage:new{ text = _("壁纸字体已设置为：") .. basename, timeout = 3 })
-                    end
-                end,
-            },
-        }},
+                    UIManager:show(InfoMessage:new{ text = _("壁纸字体已设置为：") .. basename, timeout = 3 })
+                else
+                    UIManager:show(InfoMessage:new{ text = _("字体加载失败，请选择有效字体文件。"), timeout = 4 })
+                end
+            end
+        end,
     }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
+    UIManager:show(path_chooser)
+end
+
+--- 设置自定义背景图片（文件选择器）
+function InkStain:setCustomBgImage()
+    local PathChooser = require("ui/widget/pathchooser")
+    local current_dir = "/"
+    if self.settings.bg_image_path and self.settings.bg_image_path ~= "" then
+        local dir = self.settings.bg_image_path:match("^(.+)/[^/]+$")
+        if dir and lfs.attributes(dir, "mode") == "directory" then
+            current_dir = dir
+        end
+    end
+
+    local path_chooser = PathChooser:new{
+        title = _("选择背景图片"),
+        select_file = true,
+        select_directory = false,
+        show_files = true,
+        detailed_file_info = true,
+        path = current_dir,
+        file_filter = function(filename)
+            local lower = filename:lower()
+            return lower:match("%.png$") or lower:match("%.jpg$") or lower:match("%.jpeg$")
+        end,
+        onConfirm = function(path)
+            if path and lfs.attributes(path, "mode") == "file" then
+                self.settings.bg_image_path = path
+                self.settings.bg_mode = "image"
+                self:saveSettings()
+                UIManager:show(InfoMessage:new{ text = _("背景图片已设置。"), timeout = 3 })
+            end
+        end,
+    }
+    UIManager:show(path_chooser)
 end
 
 function InkStain:setScreensaverScope(scope)
@@ -1684,6 +1868,7 @@ function InkStain:addToMainMenu(menu_items)
         text = _("墨痕壁纸"),
         sorting_hint = "more_tools",
         sub_item_table = {
+            -- ===== 操作区 =====
             {
                 text = _("生成并设为休眠壁纸"),
                 callback = function()
@@ -1700,208 +1885,313 @@ function InkStain:addToMainMenu(menu_items)
                 end,
                 separator = true,
             },
+            -- ===== 数据与统计 =====
             {
-                text = _("仅生成壁纸"),
-                callback = function()
-                    self:generate(false)
-                end,
-            },
-            {
-                text = _("休眠前自动刷新"),
-                checked_func = function()
-                    return self.settings.auto_refresh_on_suspend
-                end,
-                callback = function()
-                    self:toggleSetting("auto_refresh_on_suspend")
-                end,
-            },
-            {
-                text = _("自动设置 KOReader 休眠屏幕"),
-                checked_func = function()
-                    return self.settings.auto_set_screensaver
-                end,
-                callback = function()
-                    self:toggleSetting("auto_set_screensaver")
-                end,
-            },
-            {
-                text = _("锁屏使用范围"),
+                text = _("数据与统计"),
                 sub_item_table = {
                     {
-                        text = _("只在主页使用"),
+                        text = _("统计周期"),
+                        sub_item_table = {
+                            {
+                                text = _("今天"),
+                                checked_func = function() return self.settings.days == 1 end,
+                                callback = function() self:setDays(1) end,
+                            },
+                            {
+                                text = _("最近 7 天"),
+                                checked_func = function() return self.settings.days == 7 end,
+                                callback = function() self:setDays(7) end,
+                            },
+                            {
+                                text = _("最近 30 天"),
+                                checked_func = function() return self.settings.days == 30 end,
+                                callback = function() self:setDays(30) end,
+                            },
+                            {
+                                text = _("最近一个季度"),
+                                checked_func = function() return self.settings.days == 90 end,
+                                callback = function() self:setDays(90) end,
+                            },
+                            {
+                                text = _("最近半年"),
+                                checked_func = function() return self.settings.days == 180 end,
+                                callback = function() self:setDays(180) end,
+                            },
+                            {
+                                text = _("最近一年"),
+                                checked_func = function() return self.settings.days == 365 end,
+                                callback = function() self:setDays(365) end,
+                            },
+                            {
+                                text = _("最近 10 年"),
+                                checked_func = function() return self.settings.days == 3650 end,
+                                callback = function() self:setDays(3650) end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("书单数量"),
+                        sub_item_table = {
+                            {
+                                text = "Top 2",
+                                checked_func = function() return self.settings.top_n == 2 end,
+                                callback = function() self:setTopN(2) end,
+                            },
+                            {
+                                text = "Top 3",
+                                checked_func = function() return self.settings.top_n == 3 end,
+                                callback = function() self:setTopN(3) end,
+                            },
+                            {
+                                text = "Top 4",
+                                checked_func = function() return self.settings.top_n == 4 end,
+                                callback = function() self:setTopN(4) end,
+                            },
+                            {
+                                text = "Top 5",
+                                checked_func = function() return self.settings.top_n == 5 end,
+                                callback = function() self:setTopN(5) end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("数据源"),
+                        sub_item_table = {
+                            {
+                                text = _("KOReader 阅读统计"),
+                                checked_func = function() return (self.settings.data_source or "koreader") == "koreader" end,
+                                callback = function()
+                                    self.settings.data_source = "koreader"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("数据源已切换为 KOReader 阅读统计。"), timeout = 3 })
+                                end,
+                            },
+                            {
+                                text = _("觅阅书架"),
+                                checked_func = function() return self.settings.data_source == "miuread" end,
+                                callback = function()
+                                    local miuread_path = DataStorage:getSettingsDir() .. "/miuread.lua"
+                                    if lfs.attributes(miuread_path, "mode") ~= "file" then
+                                        UIManager:show(InfoMessage:new{ text = _("未检测到觅阅插件数据。\n请先安装并使用觅阅插件。"), timeout = 5 })
+                                        return
+                                    end
+                                    self.settings.data_source = "miuread"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("数据源已切换为觅阅书架。"), timeout = 3 })
+                                end,
+                            },
+                            {
+                                text = _("两者合并"),
+                                checked_func = function() return self.settings.data_source == "both" end,
+                                callback = function()
+                                    self.settings.data_source = "both"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("数据源已切换为 KOReader + 觅阅合并。"), timeout = 3 })
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("进度模式"),
+                        sub_item_table = {
+                            {
+                                text = _("总进度"),
+                                checked_func = function() return (self.settings.progress_mode or "total") == "total" end,
+                                callback = function()
+                                    self.settings.progress_mode = "total"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("进度模式已切换为总进度（全期阅读位置）。"), timeout = 3 })
+                                end,
+                            },
+                            {
+                                text = _("本期进度"),
+                                checked_func = function() return self.settings.progress_mode == "period" end,
+                                callback = function()
+                                    self.settings.progress_mode = "period"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("进度模式已切换为本期进度（本期阅读页数占比）。"), timeout = 3 })
+                                end,
+                            },
+                        },
+                    },
+                },
+            },
+            -- ===== 外观设置 =====
+            {
+                text = _("外观设置"),
+                sub_item_table = {
+                    {
+                        text = _("背景模式"),
+                        sub_item_table = {
+                            {
+                                text = _("纯白背景"),
+                                checked_func = function() return (self.settings.bg_mode or "white") == "white" end,
+                                callback = function()
+                                    self.settings.bg_mode = "white"
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("已切换为纯白背景。"), timeout = 2 })
+                                end,
+                            },
+                            {
+                                text = _("自定义图片"),
+                                checked_func = function() return self.settings.bg_mode == "image" end,
+                                callback = function()
+                                    if not self.settings.bg_image_path or self.settings.bg_image_path == "" then
+                                        self:setCustomBgImage()
+                                    else
+                                        self.settings.bg_mode = "image"
+                                        self:saveSettings()
+                                        UIManager:show(InfoMessage:new{ text = _("已切换为自定义图片背景。"), timeout = 2 })
+                                    end
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("选择背景图片"),
+                        callback = function()
+                            self:setCustomBgImage()
+                        end,
+                    },
+                    {
+                        text = _("清除背景图片"),
+                        callback = function()
+                            self.settings.bg_image_path = ""
+                            self.settings.bg_mode = "white"
+                            self:saveSettings()
+                            UIManager:show(InfoMessage:new{ text = _("已清除背景图片。"), timeout = 3 })
+                        end,
+                    },
+                    {
+                        text = _("墨水污渍效果"),
+                        checked_func = function() return self.settings.show_stains end,
+                        callback = function()
+                            self:toggleSetting("show_stains")
+                            UIManager:show(InfoMessage:new{
+                                text = self.settings.show_stains and _("墨水污渍效果已开启。") or _("墨水污渍效果已关闭。"),
+                                timeout = 2,
+                            })
+                        end,
+                    },
+                    {
+                        text = _("壁纸字体"),
+                        sub_item_table = {
+                            {
+                                text = _("选择字体文件"),
+                                callback = function()
+                                    self:setCustomFont()
+                                end,
+                            },
+                            {
+                                text = _("恢复内置字体"),
+                                callback = function()
+                                    self.settings.font_name = ""
+                                    self:saveSettings()
+                                    UIManager:show(InfoMessage:new{ text = _("已切换为内置字体。"), timeout = 3 })
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("壁纸语言"),
+                        sub_item_table = {
+                            {
+                                text = _("简体中文"),
+                                checked_func = function() return (self.settings.wallpaper_lang or "zh") == "zh" end,
+                                callback = function()
+                                    self.settings.wallpaper_lang = "zh"
+                                    self:saveSettings()
+                                    i18n.clearCache()
+                                    UIManager:show(InfoMessage:new{ text = _("壁纸语言已切换为简体中文。"), timeout = 3 })
+                                end,
+                            },
+                            {
+                                text = _("繁體中文（香港）"),
+                                checked_func = function() return self.settings.wallpaper_lang == "zh-HK" end,
+                                callback = function()
+                                    self.settings.wallpaper_lang = "zh-HK"
+                                    self:saveSettings()
+                                    i18n.clearCache()
+                                    UIManager:show(InfoMessage:new{ text = _("壁紙語言已切換為繁體中文（香港）。"), timeout = 3 })
+                                end,
+                            },
+                            {
+                                text = _("English"),
+                                checked_func = function() return self.settings.wallpaper_lang == "en" end,
+                                callback = function()
+                                    self.settings.wallpaper_lang = "en"
+                                    self:saveSettings()
+                                    i18n.clearCache()
+                                    UIManager:show(InfoMessage:new{ text = _("Wallpaper language switched to English."), timeout = 3 })
+                                end,
+                            },
+                        },
+                    },
+                },
+            },
+            -- ===== 通用设置 =====
+            {
+                text = _("通用设置"),
+                sub_item_table = {
+                    {
+                        text = _("仅生成壁纸"),
+                        callback = function()
+                            self:generate(false)
+                        end,
+                    },
+                    {
+                        text = _("休眠前自动刷新"),
                         checked_func = function()
-                            return self.settings.menu_scope == "home"
+                            return self.settings.auto_refresh_on_suspend
                         end,
                         callback = function()
-                            self:setScreensaverScope("home")
+                            self:toggleSetting("auto_refresh_on_suspend")
                         end,
                     },
                     {
-                        text = _("主页和阅读界面都使用"),
+                        text = _("自动设置 KOReader 休眠屏幕"),
                         checked_func = function()
-                            return self.settings.menu_scope == "both"
+                            return self.settings.auto_set_screensaver
                         end,
                         callback = function()
-                            self:setScreensaverScope("both")
+                            self:toggleSetting("auto_set_screensaver")
+                        end,
+                    },
+                    {
+                        text = _("锁屏使用范围"),
+                        sub_item_table = {
+                            {
+                                text = _("只在主页使用"),
+                                checked_func = function()
+                                    return self.settings.menu_scope == "home"
+                                end,
+                                callback = function()
+                                    self:setScreensaverScope("home")
+                                end,
+                            },
+                            {
+                                text = _("主页和阅读界面都使用"),
+                                checked_func = function()
+                                    return self.settings.menu_scope == "both"
+                                end,
+                                callback = function()
+                                    self:setScreensaverScope("both")
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("显示输出路径"),
+                        callback = function()
+                            UIManager:show(InfoMessage:new{
+                                text = self.output_file,
+                                timeout = 6,
+                            })
                         end,
                     },
                 },
             },
-            {
-                text = _("统计周期"),
-                sub_item_table = {
-                    {
-                        text = _("今天"),
-                        checked_func = function() return self.settings.days == 1 end,
-                        callback = function() self:setDays(1) end,
-                    },
-                    {
-                        text = _("最近 7 天"),
-                        checked_func = function() return self.settings.days == 7 end,
-                        callback = function() self:setDays(7) end,
-                    },
-                    {
-                        text = _("最近 30 天"),
-                        checked_func = function() return self.settings.days == 30 end,
-                        callback = function() self:setDays(30) end,
-                    },
-                },
-            },
-            {
-                text = _("书单数量"),
-                sub_item_table = {
-                    {
-                        text = "Top 2",
-                        checked_func = function() return self.settings.top_n == 2 end,
-                        callback = function() self:setTopN(2) end,
-                    },
-                    {
-                        text = "Top 3",
-                        checked_func = function() return self.settings.top_n == 3 end,
-                        callback = function() self:setTopN(3) end,
-                    },
-                    {
-                        text = "Top 4",
-                        checked_func = function() return self.settings.top_n == 4 end,
-                        callback = function() self:setTopN(4) end,
-                    },
-                    {
-                        text = "Top 5",
-                        checked_func = function() return self.settings.top_n == 5 end,
-                        callback = function() self:setTopN(5) end,
-                    },
-                },
-            },
-            {
-                text = _("数据源"),
-                sub_item_table = {
-                    {
-                        text = _("KOReader 阅读统计"),
-                        checked_func = function() return (self.settings.data_source or "koreader") == "koreader" end,
-                        callback = function()
-                            self.settings.data_source = "koreader"
-                            self:saveSettings()
-                            UIManager:show(InfoMessage:new{ text = _("数据源已切换为 KOReader 阅读统计。"), timeout = 3 })
-                        end,
-                    },
-                    {
-                        text = _("觅阅书架"),
-                        checked_func = function() return self.settings.data_source == "miuread" end,
-                        callback = function()
-                            local miuread_path = DataStorage:getSettingsDir() .. "/miuread.lua"
-                            if lfs.attributes(miuread_path, "mode") ~= "file" then
-                                UIManager:show(InfoMessage:new{ text = _("未检测到觅阅插件数据。\n请先安装并使用觅阅插件。"), timeout = 5 })
-                                return
-                            end
-                            self.settings.data_source = "miuread"
-                            self:saveSettings()
-                            UIManager:show(InfoMessage:new{ text = _("数据源已切换为觅阅书架。"), timeout = 3 })
-                        end,
-                    },
-                    {
-                        text = _("两者合并"),
-                        checked_func = function() return self.settings.data_source == "both" end,
-                        callback = function()
-                            self.settings.data_source = "both"
-                            self:saveSettings()
-                            UIManager:show(InfoMessage:new{ text = _("数据源已切换为 KOReader + 觅阅合并。"), timeout = 3 })
-                        end,
-                    },
-                },
-            },
-            {
-                text = _("壁纸字体"),
-                callback = function()
-                    self:setCustomFont()
-                end,
-            },
-            {
-                text = _("进度模式"),
-                sub_item_table = {
-                    {
-                        text = _("总进度"),
-                        checked_func = function() return (self.settings.progress_mode or "total") == "total" end,
-                        callback = function()
-                            self.settings.progress_mode = "total"
-                            self:saveSettings()
-                            UIManager:show(InfoMessage:new{ text = _("进度模式已切换为总进度（全期阅读位置）。"), timeout = 3 })
-                        end,
-                    },
-                    {
-                        text = _("本期进度"),
-                        checked_func = function() return self.settings.progress_mode == "period" end,
-                        callback = function()
-                            self.settings.progress_mode = "period"
-                            self:saveSettings()
-                            UIManager:show(InfoMessage:new{ text = _("进度模式已切换为本期进度（本期阅读页数占比）。"), timeout = 3 })
-                        end,
-                    },
-                },
-            },
-            {
-                text = _("壁纸语言"),
-                sub_item_table = {
-                    {
-                        text = _("简体中文"),
-                        checked_func = function() return (self.settings.wallpaper_lang or "zh") == "zh" end,
-                        callback = function()
-                            self.settings.wallpaper_lang = "zh"
-                            self:saveSettings()
-                            i18n.clearCache()
-                            UIManager:show(InfoMessage:new{ text = _("壁纸语言已切换为简体中文。"), timeout = 3 })
-                        end,
-                    },
-                    {
-                        text = _("繁體中文（香港）"),
-                        checked_func = function() return self.settings.wallpaper_lang == "zh-HK" end,
-                        callback = function()
-                            self.settings.wallpaper_lang = "zh-HK"
-                            self:saveSettings()
-                            i18n.clearCache()
-                            UIManager:show(InfoMessage:new{ text = _("壁紙語言已切換為繁體中文（香港）。"), timeout = 3 })
-                        end,
-                    },
-                    {
-                        text = _("English"),
-                        checked_func = function() return self.settings.wallpaper_lang == "en" end,
-                        callback = function()
-                            self.settings.wallpaper_lang = "en"
-                            self:saveSettings()
-                            i18n.clearCache()
-                            UIManager:show(InfoMessage:new{ text = _("Wallpaper language switched to English."), timeout = 3 })
-                        end,
-                    },
-                },
-            },
-            {
-                text = _("显示输出路径"),
-                callback = function()
-                    UIManager:show(InfoMessage:new{
-                        text = self.output_file,
-                        timeout = 6,
-                    })
-                end,
-            },
+            -- ===== 关于与更新 =====
             {
                 text = _("检查更新"),
                 separator = true,
