@@ -1,4 +1,4 @@
-<img width="1846" height="2570" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/8bf9d7d2-80fe-4b31-bbfd-50b3ed991604" /># 📖 KOReader 墨痕壁纸
+## 📖 KOReader 墨痕壁纸
 
 [![English](https://img.shields.io/badge/English-555555?style=for-the-badge&logo=github)](./README_en.md)
 [![简体中文](https://img.shields.io/badge/简体中文-12B7F5?style=for-the-badge&logo=github)](./README.md)
