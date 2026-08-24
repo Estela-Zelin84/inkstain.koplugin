@@ -124,6 +124,71 @@ do
         for i = 1, 8 do out[i] = behex(h[i]) end
         return table.concat(out)
     end
+
+    -- Streaming SHA-256: read the file in chunks so the whole payload is
+    -- never loaded into memory at once. Critical on low-RAM devices (Kindle)
+    -- where buffering the full download/package previously caused OOM crashes.
+    local function sha256_update_blocks(h, s)
+        for pos = 1, #s, 64 do
+            local w = {}
+            for j = 0, 15 do w[j] = be32(s, pos + j * 4) end
+            for j = 16, 63 do
+                local x = bxor(ror(w[j - 15], 7), ror(w[j - 15], 18), rshift(w[j - 15], 3))
+                local y = bxor(ror(w[j - 2], 17), ror(w[j - 2], 19), rshift(w[j - 2], 10))
+                w[j] = plus(w[j - 16], x, w[j - 7], y)
+            end
+            local a, b, c, d, e, f, g, q =
+                h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+            for j = 0, 63 do
+                local s1 = bxor(ror(e, 6), ror(e, 11), ror(e, 25))
+                local ch = bxor(band(e, f), band(bnot(e), g))
+                local t1 = plus(q, s1, ch, H[j + 1], w[j])
+                local s0 = bxor(ror(a, 2), ror(a, 13), ror(a, 22))
+                local maj = bxor(band(a, b), band(a, c), band(b, c))
+                local t2 = plus(s0, maj)
+                q, g, f, e, d, c, b, a =
+                    g, f, e, plus(d, t1), c, b, a, plus(t1, t2)
+            end
+            h[1], h[2], h[3], h[4] = plus(h[1], a), plus(h[2], b), plus(h[3], c), plus(h[4], d)
+            h[5], h[6], h[7], h[8] = plus(h[5], e), plus(h[6], f), plus(h[7], g), plus(h[8], q)
+        end
+    end
+    local function sha256_digest(h, total_bits, tail)
+        local s = tail
+        local pad = (56 - (#s + 1) % 64) % 64
+        s = s .. string.char(128) .. string.rep("\0", pad)
+            .. string.char(0, 0, 0, 0,
+                band(rshift(total_bits, 24), 255), band(rshift(total_bits, 16), 255),
+                band(rshift(total_bits, 8), 255), band(total_bits, 255))
+        sha256_update_blocks(h, s)
+        local out = {}
+        for i = 1, 8 do out[i] = behex(h[i]) end
+        return table.concat(out)
+    end
+    function Digests.sha256_file(path, chunk_size)
+        chunk_size = chunk_size or 65536
+        local f = io.open(path, "rb")
+        if not f then return nil end
+        local h = {
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        }
+        local total_bits = 0
+        local tail = ""
+        while true do
+            local chunk = f:read(chunk_size)
+            if not chunk then break end
+            total_bits = total_bits + #chunk * 8
+            local buf = tail .. chunk
+            -- Consume all complete 64-byte blocks; keep the remainder as tail.
+            local pos = 1
+            while #buf - pos + 1 >= 64 do pos = pos + 64 end
+            if pos > 1 then sha256_update_blocks(h, buf:sub(1, pos - 1)) end
+            tail = buf:sub(pos)
+        end
+        f:close()
+        return sha256_digest(h, total_bits, tail)
+    end
 end
 
 -- ===== Utility functions (ported from miuread util.lua) =====
@@ -466,8 +531,17 @@ function HttpClient:_request_once(opt)
     headers["User-Agent"] = headers["User-Agent"] or self.user_agent
     headers["Accept"] = headers["Accept"] or "*/*"
 
+    -- Hard cap on buffered (in-memory) response bodies. Large bodies are
+    -- only acceptable when streamed to a file sink (opt.sink). Cap prevents
+    -- a stray HTML error page from a flaky mirror from exhausting RAM.
+    local MAX_BUFFERED_BODY = tonumber(opt.max_buffered_body) or 262144 -- 256KB
     for hop = 0, redirects do
-        local chunks = {}
+        local sink = opt.sink
+        local chunks
+        if not sink then
+            chunks = {}
+            sink = ltn12.sink.table(chunks)
+        end
         if socketutil then
             socketutil:set_timeout((opt.timeout and opt.timeout[1]) or 15, (opt.timeout and opt.timeout[2]) or 45)
         end
@@ -485,7 +559,7 @@ function HttpClient:_request_once(opt)
             url = current,
             method = method,
             headers = headers,
-            sink = ltn12.sink.table(chunks),
+            sink = sink,
         })
         if socketutil then socketutil:reset_timeout() end
         if not called then
@@ -495,21 +569,45 @@ function HttpClient:_request_once(opt)
             return nil, nil, nil, current, tostring(code)
         end
         code = tonumber(code)
-        local text = table.concat(chunks)
-        if not code then
-            return text, nil, resp_headers, current
-        end
-        -- Manual redirect following
-        if code >= 300 and code < 400 and resp_headers then
-            local location = hget(resp_headers, "location")
-            if location and hop < redirects then
-                current = absolute(current, location)
-                if code == 303 then method = "GET" end
+        if opt.sink then
+            -- Streamed to file: nothing to concatenate.
+            if not code then
+                return true, nil, resp_headers, current
+            end
+            -- Manual redirect following
+            if code >= 300 and code < 400 and resp_headers then
+                local location = hget(resp_headers, "location")
+                if location and hop < redirects then
+                    current = absolute(current, location)
+                    if code == 303 then method = "GET" end
+                else
+                    return true, code, resp_headers, current
+                end
+            else
+                return true, code, resp_headers, current
+            end
+        else
+            local text = table.concat(chunks)
+            if #text > MAX_BUFFERED_BODY then
+                logger.warn("[InkStain][Updater] response body too large; truncated",
+                    "url=", U.redact_url(current), "bytes=", tostring(#text))
+                text = text:sub(1, MAX_BUFFERED_BODY)
+            end
+            if not code then
+                return text, nil, resp_headers, current
+            end
+            -- Manual redirect following
+            if code >= 300 and code < 400 and resp_headers then
+                local location = hget(resp_headers, "location")
+                if location and hop < redirects then
+                    current = absolute(current, location)
+                    if code == 303 then method = "GET" end
+                else
+                    return text, code, resp_headers, current
+                end
             else
                 return text, code, resp_headers, current
             end
-        else
-            return text, code, resp_headers, current
         end
     end
     return nil, nil, nil, current, "too many redirects"
@@ -576,11 +674,44 @@ function HttpClient:download(url, opt)
     opt.url = url
     opt.method = "GET"
     if opt.retries == nil then opt.retries = 2 end
-    local body, code, headers, final = self:request(opt)
-    if code and code >= 200 and code < 300 and type(body) == "string" and #body > 0 then
-        return body
+    -- Stream the response body straight to a file sink so the full payload
+    -- is never buffered in memory. opt.path must be provided by the caller.
+    local path = opt.path
+    if not path or path == "" then
+        return nil, "download requires opt.path for streaming"
     end
-    return nil, "download HTTP " .. tostring(code or "nil")
+    local tmp = path .. ".part"
+    os.remove(tmp)
+    local fh, ferr = io.open(tmp, "wb")
+    if not fh then return nil, "cannot open download temp: " .. tostring(ferr) end
+    opt.sink = ltn12.sink.file(fh)
+    local ok, code, headers, final, err = self:request(opt)
+    fh:close()
+    if not ok then
+        os.remove(tmp)
+        return nil, "download HTTP " .. tostring(code or err or "nil")
+    end
+    if not code or code < 200 or code >= 300 then
+        os.remove(tmp)
+        return nil, "download HTTP " .. tostring(code or "nil")
+    end
+    -- Guard against a flaky mirror serving an HTML error page with a 200.
+    local content_type = hget(headers, "content-type") or ""
+    if content_type:lower():find("text/html") then
+        os.remove(tmp)
+        return nil, "download returned HTML, not a package (mirror error)"
+    end
+    local declared = tonumber(tostring(hget(headers, "content-length") or ""):match("%d+"))
+    if declared and declared > 0 then
+        local written = U.file_size(tmp)
+        if written ~= declared then
+            os.remove(tmp)
+            return nil, "download size mismatch: expected " .. tostring(declared)
+                .. " got " .. tostring(written)
+        end
+    end
+    os.rename(tmp, path)
+    return path
 end
 
 -- ===== Updater class (modeled on miuread updater.lua) =====
@@ -841,21 +972,20 @@ local function file_bytes(path)
 end
 
 local function download_one(self, url, path)
-    os.remove(path)
-    local ok, data = pcall(function()
-        return self.http:download(url, { retries = 2, redirects = 10, timeout = { 20, 150 } })
+    -- Stream straight to disk via LuaSocket; fall back to curl if the Lua
+    -- transport is unavailable. Never buffers the whole package in memory.
+    local ok, result = pcall(function()
+        return self.http:download(url, { retries = 0, redirects = 10, timeout = { 20, 150 }, path = path })
     end)
-    if ok and type(data) == "string" and #data > 0 then
-        local wrote, err = U.atomic_write(path, data, true)
-        if not wrote then return nil, err or "无法保存更新包" end
+    if ok and type(result) == "string" and U.file_exists(result) then
         return true
     end
-    logger.warn("[InkStain][Updater] Lua download unavailable or empty; using curl", url, tostring(data))
-    if curl_download(url, path) then
-        local raw = file_bytes(path)
-        if type(raw) == "string" and #raw > 0 then return true end
+    logger.warn("[InkStain][Updater] Lua download unavailable or empty; using curl", url, tostring(result))
+    os.remove(path)
+    if curl_download(url, path) and U.file_exists(path) then
+        return true
     end
-    return nil, tostring(data or "下载失败")
+    return nil, tostring(result or "下载失败")
 end
 
 function Updater:download(manifest)
@@ -870,19 +1000,27 @@ function Updater:download(manifest)
     local expected_size = tonumber(manifest.size or manifest.bytes or manifest.package_size)
     local last_error = "下载失败"
 
+    -- Try each mirror at most once. HttpClient already handles transient
+    -- retries internally; the previous double-retry loop multiplied memory
+    -- pressure on low-RAM devices and is removed.
+    local tried = 0
+    local max_tries = math.max(1, #urls)
     for index, url in ipairs(urls) do
+        if tried >= max_tries then break end
+        tried = tried + 1
         local downloaded, err = download_one(self, url, p)
-        local raw = downloaded and file_bytes(p) or nil
-        if type(raw) == "string" and #raw > 0 then
-            if expected_size and expected_size > 0 and #raw ~= expected_size then
+        if downloaded and U.file_exists(p) then
+            local size = U.file_size(p)
+            if expected_size and expected_size > 0 and size ~= expected_size then
                 last_error = "更新包大小不符"
                 logger.warn("[InkStain][Updater] size mismatch", url,
-                    "expected=", tostring(expected_size), "actual=", tostring(#raw))
+                    "expected=", tostring(expected_size), "actual=", tostring(size))
             else
-                local actual = Digests.sha256(raw):lower()
+                -- Streaming SHA-256: reads the file in chunks, no full load.
+                local actual = (Digests.sha256_file(p) or ""):lower()
                 if actual == expected then
                     logger.info("[InkStain][Updater] package downloaded",
-                        "source=", tostring(index), "bytes=", tostring(#raw),
+                        "source=", tostring(index), "bytes=", tostring(size),
                         "version=", tostring(manifest.version))
                     return p
                 end
