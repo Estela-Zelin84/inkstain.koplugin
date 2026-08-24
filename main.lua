@@ -6,29 +6,34 @@ KOReader 墨痕壁纸。
 --]]--
 
 local Blitbuffer = require("ffi/blitbuffer")
-local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
 local Device = require("device")
-local Font = require("ui/font")
 local FontList = require("fontlist")
-local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
-local RenderImage = require("ui/renderimage")
-local SQ3 = require("lua-ljsqlite3/init")
-local TextBoxWidget = require("ui/widget/textboxwidget")
-local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
-local util = require("util")
 local _ = require("gettext")
 local T = ffiutil.template
-local i18n = require("i18n")
 
-local Updater = require("updater")
-local PLUGIN_VERSION = "3.1.0"
+-- 懒加载模块：仅在首次使用时 require，减少启动开销
+local Updater -- 延迟到首次 OTA 操作时加载
+local i18n    -- 延迟到首次生成壁纸时加载
+local ConfirmBox
+local InfoMessage
+local Font
+local RenderImage
+local SQ3
+local TextBoxWidget
+local TextWidget
+local PathChooser
+local Event
+local NetworkMgr
+local LuaSettings
+local util
+
+local PLUGIN_VERSION = "3.5.5"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -109,6 +114,7 @@ end
 local function truncate(value, limit)
     value = tostring(value or "")
     limit = limit or 18
+    if not util then util = require("util") end
     local ok, chars = pcall(util.splitToChars, value)
     if not ok or type(chars) ~= "table" then
         if #value > limit * 3 then
@@ -165,6 +171,7 @@ end
 
 local function ensureDir(path)
     if lfs.attributes(path, "mode") == "directory" then return true end
+    if not util then util = require("util") end
     if util.makePath then
         return util.makePath(path)
     end
@@ -208,6 +215,7 @@ function InkStain:init()
     self.output_file = self.output_dir .. "/inkstain_wallpaper.png"
     self.legacy_output_dir = DataStorage:getDataDir() .. "/screensaver/inkstain"
     self.db_location = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
+    -- 字体复制：仅在目标文件不存在时执行（首次安装）
     local font_src = (self.path or "") .. "/assets/" .. PLUGIN_FONT_NAME
     local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
     if lfs.attributes(font_src, "mode") == "file" and not lfs.attributes(font_dest, "mode") then
@@ -228,29 +236,15 @@ function InkStain:init()
     end
     _G.InkStainWallpaper = self
 
-    -- OTA updater initialization (modeled on miuread)
-    self.updater = Updater:new(PLUGIN_VERSION, self.path)
+    -- OTA：延迟到首次菜单访问时初始化，避免启动时加载 updater.lua（含 SHA-256 等重模块）
+    self._updater_initialized = false
     self._auto_update_check_running = false
-    local update_state = self.updater:startup()
-    if update_state == "updated" then
-        UIManager:scheduleIn(1, function()
-            UIManager:show(InfoMessage:new{
-                text = _("更新完成，当前运行版本 ") .. PLUGIN_VERSION,
-                timeout = 4,
-            })
-        end)
-    elseif update_state == "mismatch" then
-        UIManager:scheduleIn(1, function()
-            UIManager:show(InfoMessage:new{
-                text = _("更新文件已替换，但当前运行版本与目标版本不一致。\n\n请完整退出并重新启动 KOReader。"),
-                timeout = 0,
-            })
-        end)
-    end
-    -- Schedule auto-update check after 5 seconds
-    UIManager:scheduleIn(5.0, function()
-        self:maybeAutoCheckUpdate(false)
-    end)
+    -- 从设置中恢复上次刷新时间戳，避免重启后首次休眠强制生成
+    self.last_refresh_ts = tonumber(self.settings.last_refresh_ts) or 0
+    -- 周期刷新定时器：唤醒时按 refresh_interval 静默刷新壁纸
+    -- 替代原休眠前生成模式，彻底解决休眠/唤醒卡顿
+    self._periodic_timer_running = false
+    self:_schedulePeriodicRefresh()
 end
 
 function InkStain:saveSettings()
@@ -258,6 +252,181 @@ function InkStain:saveSettings()
     if G_reader_settings.flush then
         G_reader_settings:flush()
     end
+end
+
+--- 周期性静默刷新壁纸（设备唤醒时按 refresh_interval 执行）
+--  替代原休眠前生成模式，避免休眠/唤醒时的卡顿感
+function InkStain:_schedulePeriodicRefresh()
+    if self._periodic_timer_running then return end
+    if not self.settings.auto_refresh_on_suspend then return end
+    if not self.settings.auto_set_screensaver then return end
+    local interval = self.settings.refresh_interval or 600
+    self._periodic_timer_running = true
+    UIManager:scheduleIn(interval, function()
+        self._periodic_timer_running = false
+        if not self.settings.auto_refresh_on_suspend then return end
+        if not self.settings.auto_set_screensaver then return end
+        if not self:shouldApplyInCurrentContext() then
+            self:_schedulePeriodicRefresh()
+            return
+        end
+        local now = os.time()
+        if now - (self.last_refresh_ts or 0) < interval then
+            self:_schedulePeriodicRefresh()
+            return
+        end
+        -- 后台静默生成，不显示提示
+        self:generate(true)
+        self:_schedulePeriodicRefresh()
+    end)
+end
+
+--- 设备唤醒时重新调度周期刷新
+function InkStain:onResume()
+    self:_schedulePeriodicRefresh()
+end
+
+--- 懒加载 OTA 模块：首次调用时 require pluginota.updater 并执行 startup() 确认
+--  全程 pcall 保护，任何加载失败都不会导致闪退，只会禁用 OTA 功能
+--  使用 socket+ssl 内置库做 HTTPS，避免 os.execute("curl") fork 子进程导致低内存设备 OOM 闪退
+function InkStain:_ensureUpdater()
+    if self._updater_initialized then return self.ota end
+    self._updater_initialized = true -- 标记为已尝试，避免反复重试
+
+    -- 第一步：检查 JSON 支持（pluginota 的前置依赖）
+    local has_json = false
+    local ok_json, _ = pcall(require, "json")
+    if ok_json then has_json = true end
+    if not has_json then
+        local ok_rj, _ = pcall(require, "rapidjson")
+        if ok_rj then has_json = true end
+    end
+    if not has_json then
+        logger.warn("[InkStain] OTA unavailable: no JSON support (json/rapidjson)")
+        self._ota_error = _("当前设备不支持 JSON，无法使用更新功能。")
+        return nil
+    end
+
+    -- 第二步：加载 OTA 配置
+    local ok_config, OtaConfig = pcall(require, "ota_config")
+    if not ok_config or type(OtaConfig) ~= "table" then
+        logger.warn("[InkStain] OTA config load failed:", OtaConfig)
+        self._ota_error = _("更新配置加载失败。")
+        return nil
+    end
+
+    -- 第三步：尝试加载 socket + ssl（作为内置 HTTP 客户端，替代 curl）
+    local http_ok, https = pcall(require, "ssl.https")
+    local ltn12_ok, ltn12 = pcall(require, "ltn12")
+    local socket_ok = http_ok and ltn12_ok
+    if not socket_ok then
+        logger.warn("[InkStain] OTA: ssl.https not available, falling back to curl")
+    end
+
+    -- 第四步：加载 pluginota.updater
+    local ok_updater, Updater = pcall(require, "pluginota.updater")
+    if not ok_updater or type(Updater) ~= "table" then
+        logger.warn("[InkStain] OTA updater load failed:", Updater)
+        self._ota_error = _("更新模块加载失败：") .. tostring(Updater or "未知错误")
+        return nil
+    end
+
+    -- 第五步：构造自定义 HTTP 函数（使用 ssl.https，不 fork 子进程）
+    local http_get_func, http_download_func
+    if socket_ok then
+        http_get_func = function(url, opts)
+            opts = opts or {}
+            local connect_timeout = opts.connect_timeout or 5
+            local total_timeout = opts.total_timeout or 20
+            -- 设置超时（ssl.https 通过 socket 超时控制）
+            local prev_timeout
+            if https.TIMEOUT then
+                prev_timeout = https.TIMEOUT
+                https.TIMEOUT = total_timeout
+            end
+            local body, code, headers, status = https.request(url)
+            if prev_timeout ~= nil then
+                https.TIMEOUT = prev_timeout
+            end
+            if type(body) == "string" and body ~= "" and (code == 200 or tonumber(code) == 200) then
+                return body
+            end
+            return nil, tostring(status or code or "http request failed")
+        end
+
+        http_download_func = function(url, path, opts)
+            opts = opts or {}
+            local total_timeout = opts.total_timeout or opts.download_timeout or 240
+            local prev_timeout
+            if https.TIMEOUT then
+                prev_timeout = https.TIMEOUT
+                https.TIMEOUT = total_timeout
+            end
+            local file = io.open(path, "wb")
+            if not file then
+                if prev_timeout ~= nil then https.TIMEOUT = prev_timeout end
+                return nil, "cannot open output file"
+            end
+            local sink = ltn12.sink.file(file)
+            local result, code, headers, status = https.request{
+                url = url,
+                sink = sink,
+            }
+            if prev_timeout ~= nil then
+                https.TIMEOUT = prev_timeout
+            end
+            if result == 1 and (code == 200 or tonumber(code) == 200) then
+                return true
+            end
+            os.remove(path)
+            return nil, tostring(status or code or "download failed")
+        end
+    end
+
+    -- 第六步：构造 Updater 实例
+    local ota, err = Updater:new{
+        plugin_root = self.path,
+        plugin_dir = OtaConfig.plugin_dir,
+        plugin_id = OtaConfig.plugin_id,
+        repo = OtaConfig.repo,
+        channel = OtaConfig.channel,
+        channel_tag = OtaConfig.channel_tag,
+        github_mirrors = OtaConfig.github_mirrors,
+        http_get = http_get_func,
+        http_download = http_download_func,
+    }
+    if not ota then
+        logger.warn("[InkStain] OTA initialization failed:", err)
+        self._ota_error = _("更新初始化失败：") .. tostring(err or "未知错误")
+        return nil
+    end
+    self.ota = ota
+    self._ota_config = OtaConfig
+
+    -- 第七步：跨重启 pending 状态确认（也做 pcall 保护）
+    local ok_startup, update_state = pcall(function() return self.ota:startup() end)
+    if not ok_startup then
+        logger.warn("[InkStain] OTA startup check failed:", update_state)
+        return self.ota -- startup 失败不影响 OTA 主体功能
+    end
+    if update_state == "updated" then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:scheduleIn(1, function()
+            UIManager:show(InfoMessage:new{
+                text = _("更新完成，当前运行版本 ") .. PLUGIN_VERSION,
+                timeout = 4,
+            })
+        end)
+    elseif update_state == "mismatch" then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:scheduleIn(1, function()
+            UIManager:show(InfoMessage:new{
+                text = _("更新文件已替换，但当前运行版本与目标版本不一致。\n\n请完整退出并重新启动 KOReader。"),
+                timeout = 0,
+            })
+        end)
+    end
+    return self.ota
 end
 
 function InkStain:getRange()
@@ -276,8 +445,10 @@ end
 --   1. shelf_cache.books（云端书架-书籍）
 --   2. shelf_cache.mp（云端书架-公众号/漫画）
 --   3. library（本地书库）：用户下载到本地的书籍元数据
--- 进度存储在 sessions[bookId] 中，优先级：
---   pending.percent > progress_local_percent > verified_local_percent > row.progress
+-- 进度存储在 sessions[bookId] 中，优先级（对齐觅阅 v4.9.0 local_progress + 书架展示逻辑）：
+--   pending.percent > pending_progress.progress > progress_local_percent
+--   > local_position_snapshot.progress(safe) > verified_local_percent
+--   > progress_upload_percent > progress_remote_percent > row.progress
 function InkStain:readMiureadProgress()
     local miuread_path = DataStorage:getSettingsDir() .. "/miuread.lua"
     local result = {
@@ -289,12 +460,7 @@ function InkStain:readMiureadProgress()
     if not result.has_miuread then
         return result
     end
-    local ok, LuaSettings = pcall(require, "luasettings")
-    if not ok then
-        logger.warn("墨痕壁纸：无法加载 luasettings，不能读取觅阅数据")
-        return result
-    end
-
+    if not LuaSettings then LuaSettings = require("luasettings") end
     local ok_open, miuread_db = pcall(LuaSettings.open, LuaSettings, miuread_path)
     if not ok_open or not miuread_db then
         logger.warn("墨痕壁纸：无法打开觅阅设置文件", tostring(miuread_db or "unknown"))
@@ -324,22 +490,36 @@ function InkStain:readMiureadProgress()
         return t:lower()
     end
 
-    -- 辅助：从 session + row 中提取进度（与觅阅 local_progress 逻辑一致）
+    -- 辅助：从 session + row 中提取进度
+    -- 对齐觅阅 v4.9.0 的 local_progress() 与书架展示 _decorate_rows() 逻辑：
+    --   1. session.pending.percent          — 觅阅 local_progress 首选
+    --   2. session.pending_progress.progress — 待上传进度快照（注意是 .progress 非 .percent）
+    --   3. session.progress_local_percent    — 本地阅读进度（书架展示首选）
+    --   4. session.local_position_snapshot.progress (safe) — 本地位置快照
+    --   5. session.verified_local_percent    — 云端验证进度
+    --   6. session.progress_upload_percent   — 上传中进度
+    --   7. session.progress_remote_percent   — 远端进度
+    --   8. row.progress                      — 书架/书库条目自带进度
     local function getProgress(session, row)
         session = type(session) == "table" and session or {}
         row = type(row) == "table" and row or {}
-        -- 与觅阅 local_progress 逻辑一致，优先级从高到低：
-        -- pending.percent > progress_local_percent > verified_local_percent
-        --  > progress_upload_percent > progress_remote_percent > row.progress
         local pending = type(session.pending) == "table" and session.pending or {}
         local pending_progress = type(session.pending_progress) == "table" and session.pending_progress or {}
+        local snapshot = type(session.local_position_snapshot) == "table" and session.local_position_snapshot or {}
+        -- local_position_snapshot 仅在 safe=true 时才采用（与觅阅书架展示一致）
+        local snapshot_progress = (snapshot.safe == true) and tonumber(snapshot.progress) or nil
         local p = tonumber(pending.percent
-            or pending_progress.percent
+            or pending_progress.progress
             or session.progress_local_percent
+            or snapshot_progress
             or session.verified_local_percent
             or session.progress_upload_percent
             or session.progress_remote_percent
             or row.progress or 0) or 0
+        -- 觅阅 book() 中 finished=true 或 progress>=100 均视为读完
+        if row.finished == true or (tonumber(row.progress or 0) or 0) >= 100 then
+            p = 100
+        end
         return p
     end
 
@@ -380,12 +560,20 @@ function InkStain:readMiureadProgress()
         for _, group in ipairs(groups) do
             for _, row in ipairs(group) do
                 if type(row) == "table" then
-                    local book_id = tostring(row.bookId or row.book_id or "")
-                    local session = (book_id ~= "") and (sessions[book_id] or {}) or {}
-                    local title = row.title or ""
-                    local progress = getProgress(session, row)
-                    addBook(title, progress)
-                    shelf_book_count = shelf_book_count + 1
+                    -- 跳过流式加载占位条目（觅阅 stream 模式下未加载完的书目）
+                    if row._stream_placeholder == true then
+                        -- 占位条目跳过，等待后续加载完成后再读取
+                    else
+                        local book_id = tostring(row.bookId or row.book_id or "")
+                        local session = (book_id ~= "") and (sessions[book_id] or {}) or {}
+                        -- 觅阅 v4.9.0 的 book() 会从 row.bookInfo 或 row.book 中提取嵌套字段
+                        local info = type(row.bookInfo) == "table" and row.bookInfo
+                            or (type(row.book) == "table" and row.book or nil)
+                        local title = (info and info.title) or row.title or ""
+                        local progress = getProgress(session, row)
+                        addBook(title, progress)
+                        shelf_book_count = shelf_book_count + 1
+                    end
                 end
             end
         end
@@ -393,12 +581,17 @@ function InkStain:readMiureadProgress()
 
     -- 2. 从 library（本地书库）读取
     --    补充 shelf_cache 中没有的本地下载书籍，或 stream 模式下书架不完整的情况
+    --    觅阅 v4.9.0 的 LocalMetadata 会从 KOReader sidecar 中提取进度（percent_finished）
+    --    并存入 library 条目的 progress 字段，这里一并读取
     local library_book_count = 0
     for id, row in pairs(library) do
         if type(row) == "table" then
             local book_id = tostring(row.book_id or id or "")
             local session = (book_id ~= "") and (sessions[book_id] or {}) or {}
-            local title = row.title or ""
+            -- 觅阅 v4.9.0 的 book() 会从 row.bookInfo 或 row.book 中提取嵌套字段
+            local info = type(row.bookInfo) == "table" and row.bookInfo
+                or (type(row.book) == "table" and row.book or nil)
+            local title = (info and info.title) or row.title or ""
             local progress = getProgress(session, row)
             -- 仅在精确标题未命中时补充（shelf 数据更权威）
             if title ~= "" and progress > 0 and not result.progress_map[title] then
@@ -491,6 +684,7 @@ function InkStain:readStats()
         return result
     end
 
+    if not SQ3 then SQ3 = require("lua-ljsqlite3/init") end
     local ok, conn = pcall(SQ3.open, self.db_location)
     if not ok or not conn then
         result.error = "无法打开统计数据库"
@@ -559,6 +753,7 @@ function InkStain:readStats()
             local seconds = book_rows[3] or {}
             local read_pages = book_rows[4] or {}
             local pages = book_rows[5] or {}
+            local last_times = book_rows[6] or {}
             local max_pages_col = book_rows[7] or {}
             for i, title in ipairs(titles) do
                 table.insert(result.books, {
@@ -568,9 +763,50 @@ function InkStain:readStats()
                     read_pages = tonumber(read_pages[i]) or 0,
                     pages = tonumber(pages[i]) or 0,
                     max_page = tonumber(max_pages_col[i]) or 0,
+                    last_time = tonumber(last_times[i]) or 0,
                     source = "koreader",
                 })
             end
+        end
+
+        -- 按书名去重聚合：同一本书可能在 KOReader 中有多个 id（多副本/反复导入）
+        -- 合并规则：时长相加、页数取最大、进度页取最大、最后阅读时间取最新
+        do
+            local dedup = {}
+            local order = {}
+            for _, b in ipairs(result.books) do
+                local key = b.title
+                if dedup[key] then
+                    local existing = dedup[key]
+                    existing.seconds = existing.seconds + b.seconds
+                    existing.read_pages = existing.read_pages + b.read_pages
+                    existing.pages = math.max(existing.pages, b.pages)
+                    existing.max_page = math.max(existing.max_page, b.max_page)
+                    -- 保留最新的 last_time（SQL 已经按 seconds+last_time 排序，
+                    -- 这里简单比较即可，不影响最终排序）
+                    if b.last_time and (not existing.last_time or b.last_time > existing.last_time) then
+                        existing.last_time = b.last_time
+                    end
+                else
+                    dedup[key] = b
+                    order[#order + 1] = key
+                end
+            end
+            -- 重建 books 数组（保持原排序的总时长优先逻辑，
+            -- 但合并后需要重新按总时长排序，因为合并后顺序可能变化）
+            result.books = {}
+            for _, key in ipairs(order) do
+                result.books[#result.books + 1] = dedup[key]
+            end
+            -- 重新按阅读时长降序排列
+            table.sort(result.books, function(a, b)
+                if a.seconds ~= b.seconds then
+                    return a.seconds > b.seconds
+                end
+                return (a.last_time or 0) > (b.last_time or 0)
+            end)
+            -- 更新 book_count（去重后的真实数量）
+            result.book_count = #result.books
         end
     end)
 
@@ -623,6 +859,7 @@ function InkStain:readStats()
 end
 
 local function getFontFace(size, font_name)
+    if not Font then Font = require("ui/font") end
     local sz = math.max(8, math.floor(size))
     local fname = font_name or _active_font_name
     -- 优先使用用户自定义字体
@@ -649,6 +886,7 @@ local function getFontFace(size, font_name)
 end
 
 local function drawText(bb, text, x, y, size, bold, max_width, align, color)
+    if not TextWidget then TextWidget = require("ui/widget/textwidget") end
     local widget = TextWidget:new{
         text = tostring(text or ""),
         face = getFontFace(size),
@@ -670,6 +908,7 @@ local function drawText(bb, text, x, y, size, bold, max_width, align, color)
 end
 
 local function drawImage(bb, path, x, y, size)
+    if not RenderImage then RenderImage = require("ui/renderimage") end
     local ok, image = pcall(RenderImage.renderImageFile, RenderImage, path, false, size, size)
     if ok and image then
         local ok_blit = pcall(bb.blitFrom, bb, image, math.floor(x), math.floor(y), 0, 0, image:getWidth(), image:getHeight())
@@ -680,6 +919,7 @@ local function drawImage(bb, path, x, y, size)
 end
 
 local function drawBoxText(bb, text, x, y, width, size, bold, align)
+    if not TextBoxWidget then TextBoxWidget = require("ui/widget/textboxwidget") end
     local widget = TextBoxWidget:new{
         text = tostring(text or ""),
         face = getFontFace(size),
@@ -920,6 +1160,7 @@ end
 -- 中文模式：墨 + 痕（同字号）+ ink stain（英文在痕下方左对齐）
 -- 英文模式：Ink Stain 大字 + ink stain 小字副标题
 local function drawCustomTitle(bb, x_right, y, scale, lang, T)
+    if not TextWidget then TextWidget = require("ui/widget/textwidget") end
     if lang == "en" then
         -- 英文标题：Ink Stain
         local main_size = math.max(28, math.min(40, math.floor(38 * scale)))
@@ -998,6 +1239,7 @@ function InkStain:buildPng(stats)
     if bg_mode == "image" and self.settings.bg_image_path and self.settings.bg_image_path ~= "" then
         local bg_path = self.settings.bg_image_path
         if lfs.attributes(bg_path, "mode") == "file" then
+            if not RenderImage then RenderImage = require("ui/renderimage") end
             -- cover 模式：等比例缩放填满屏幕，居中裁剪
             local ok, img_bb = pcall(RenderImage.renderImageFile, RenderImage, bg_path, false, w, h)
             if ok and img_bb then
@@ -1027,6 +1269,7 @@ function InkStain:buildPng(stats)
     end
 
     local lang = self.settings.wallpaper_lang or "zh"
+    if not i18n then i18n = require("i18n") end
     local T = i18n.loadLang(self.path, lang)
 
     local scale = math.min(w / 600, h / 800)
@@ -1318,6 +1561,7 @@ function InkStain:shouldApplyInCurrentContext()
 end
 
 function InkStain:generate(quiet)
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     local stats = self:readStats()
     local output, err = self:writeWallpaper(stats)
     if not output then
@@ -1334,6 +1578,9 @@ function InkStain:generate(quiet)
         self:applyScreensaverSettings()
     end
     self.last_refresh_ts = os.time()
+    -- 持久化到设置，重启后仍能识别上次刷新时间，避免重启后首次休眠强制生成
+    self.settings.last_refresh_ts = self.last_refresh_ts
+    self:saveSettings()
 
     if not quiet then
         UIManager:show(InfoMessage:new{
@@ -1345,22 +1592,40 @@ function InkStain:generate(quiet)
 end
 
 function InkStain:onSuspend()
-    -- Cancel any running update task on suspend (modeled on miuread)
-    if self.updater then
-        self.updater:cancel("device suspended")
+    -- 休眠前取消正在进行的自动更新检查标记
+    if self._auto_update_check_running then
         self._auto_update_check_running = false
     end
-    if not self.settings.auto_refresh_on_suspend then return end
-    if not self:shouldApplyInCurrentContext() then
+    -- 快速路径：仅确保屏保设置正确，不做耗时的壁纸生成
+    -- 生成已移至 onCloseDocument / 周期性定时器，避免休眠前卡顿
+    if not self.settings.auto_set_screensaver then return end
+    if not self:shouldApplyInCurrentContext() then return end
+    -- 如果壁纸文件不存在（首次安装），快速生成一次
+    if not lfs.attributes(self.output_file, "mode") then
+        self:generate(true)
         return
     end
-    if not self:isUsingInkStainScreensaver() then
-        return
-    end
+    -- 如果距上次刷新已超过刷新间隔的 3 倍，做一次保底生成
+    -- （正常情况下 onCloseDocument 和周期定时器会负责更新）
     local now = os.time()
-    if self:isUsingInkStainScreensaver() and now - (self.last_refresh_ts or 0) < (self.settings.refresh_interval or 600) then
+    local interval = self.settings.refresh_interval or 600
+    if self:isUsingInkStainScreensaver() and now - (self.last_refresh_ts or 0) > interval * 3 then
+        self:generate(true)
         return
     end
+    -- 确保屏保设置指向正确的文件
+    if not self:isUsingInkStainScreensaver() then
+        self:applyScreensaver()
+    end
+end
+
+--- 关闭文档后生成壁纸（此时阅读统计已更新，且不影响休眠响应速度）
+function InkStain:onCloseDocument()
+    if not self.settings.auto_refresh_on_suspend then return end
+    if not self.settings.auto_set_screensaver then return end
+    local now = os.time()
+    -- 关闭文档时的刷新间隔短一些（300 秒），避免频繁翻页关闭时重复生成
+    if now - (self.last_refresh_ts or 0) < 300 then return end
     self:generate(true)
 end
 
@@ -1381,7 +1646,9 @@ end
 
 --- 设置自定义壁纸字体（文件选择器）
 function InkStain:setCustomFont()
-    local PathChooser = require("ui/widget/pathchooser")
+    if not PathChooser then PathChooser = require("ui/widget/pathchooser") end
+    if not Font then Font = require("ui/font") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     -- 默认从 KOReader 字体目录开始
     local start_dir = FontList.fontdir or "/"
     if self.settings.font_name and self.settings.font_name ~= "" then
@@ -1427,7 +1694,8 @@ end
 
 --- 设置自定义背景图片（文件选择器）
 function InkStain:setCustomBgImage()
-    local PathChooser = require("ui/widget/pathchooser")
+    if not PathChooser then PathChooser = require("ui/widget/pathchooser") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     local current_dir = "/"
     if self.settings.bg_image_path and self.settings.bg_image_path ~= "" then
         local dir = self.settings.bg_image_path:match("^(.+)/[^/]+$")
@@ -1462,6 +1730,7 @@ end
 function InkStain:setScreensaverScope(scope)
     self.settings.menu_scope = scope
     self:saveSettings()
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     UIManager:show(InfoMessage:new{
         text = _("锁屏使用范围已保存。"),
         timeout = 4,
@@ -1477,6 +1746,7 @@ function InkStain:disableWallpaper()
         self:restorePreviousScreensaverSettings()
     end
 
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     UIManager:show(InfoMessage:new{
         text = _("墨痕壁纸已关闭，并已停止休眠前自动刷新。"),
         timeout = 4,
@@ -1494,13 +1764,17 @@ function InkStain:restoreFromNativeScreensaverMenu()
     self:disableWallpaper()
 end
 
--- ===== OTA Update (modeled on miuread updater architecture) =====
+-- ===== OTA Update (基于 pluginota 通用框架) =====
+
+-- 默认自动检查间隔（秒）
+local OTA_DEFAULT_INTERVAL = 7 * 86400 -- 7 天
+local OTA_MIN_INTERVAL = 21600 -- 最短 6 小时（防止过于频繁）
 
 function InkStain:_updatePreferences()
     self.settings = self.settings or {}
     local defaults = {
-        auto_check = true,
-        interval = Updater.AUTO_UPDATE_INTERVAL,
+        auto_check = false,
+        interval = OTA_DEFAULT_INTERVAL,
         last_attempt_at = 0,
         last_success_at = 0,
         last_prompted_version = "",
@@ -1523,7 +1797,7 @@ function InkStain:_saveUpdatePreferences(update)
 end
 
 function InkStain:_updateIntervalLabel(seconds)
-    seconds = tonumber(seconds) or Updater.AUTO_UPDATE_INTERVAL
+    seconds = tonumber(seconds) or OTA_DEFAULT_INTERVAL
     if seconds <= 86400 then return "每天" end
     if seconds <= 3 * 86400 then return "每 3 天" end
     return "每 7 天"
@@ -1545,6 +1819,7 @@ function InkStain:updateFrequencyMenu()
                 local _, u = self:_updatePreferences()
                 u.interval = seconds
                 self:_saveUpdatePreferences(u)
+                if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
                 UIManager:show(InfoMessage:new{ text = _("更新检查频率已设为") .. label, timeout = 2 })
             end,
         }
@@ -1572,6 +1847,7 @@ function InkStain:updateRestartMenu()
                 local _, u = self:_updatePreferences()
                 u.restart_mode = mode
                 self:_saveUpdatePreferences(u)
+                if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
                 UIManager:show(InfoMessage:new{ text = label, timeout = 2 })
             end,
         }
@@ -1581,7 +1857,17 @@ end
 
 function InkStain:updateSettingsMenu()
     local _, update = self:_updatePreferences()
-    local Config = Updater.Config
+    local channel_label = "稳定版"
+    -- 安全地读取 OTA 配置（纯 Lua 文件，不加载 C 扩展），用于显示通道名称
+    if not self._ota_config_cache then
+        local ok, cfg = pcall(require, "ota_config")
+        if ok and type(cfg) == "table" then
+            self._ota_config_cache = cfg
+        end
+    end
+    if self._ota_config_cache and self._ota_config_cache.channel == "beta" then
+        channel_label = "测试版"
+    end
     return {
         {
             text = _("自动检查更新"),
@@ -1605,19 +1891,31 @@ function InkStain:updateSettingsMenu()
             sub_item_table_func = function() return self:updateRestartMenu() end,
         },
         {
-            text = _("检查") .. tostring(Config.UPDATE_CHANNEL_LABEL) .. _("更新"),
+            text = _("检查") .. channel_label .. _("更新"),
             callback = function() self:checkForUpdate(false) end,
+        },
+        {
+            text = _("手动下载地址"),
+            callback = function()
+                if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+                local repo_url = "github.com/Estela-Zelin84/inkstain.koplugin/releases"
+                UIManager:show(InfoMessage:new{
+                    text = _("手动下载最新版：\n\n") .. repo_url .. "\n\n"
+                        .. _("下载后将 inkstain.koplugin 文件夹复制到 KOReader 插件目录即可。"),
+                    timeout = 0,
+                })
+            end,
         },
         {
             text = _("当前运行版本 · ") .. tostring(PLUGIN_VERSION),
             enabled = false,
         },
         {
-            text = _("更新通道 · ") .. tostring(Config.UPDATE_CHANNEL_LABEL),
+            text = _("更新通道 · ") .. channel_label,
             enabled = false,
         },
         {
-            text = _("当前版本 · GPL-3.0"),
+            text = _("基于 Plugin OTA 框架"),
             enabled = false,
         },
     }
@@ -1625,6 +1923,7 @@ end
 
 function InkStain:_restartKOReader(source)
     if self._koreader_restart_requested then return true end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     local Device = require("device")
     if Device and Device.isAndroid and Device:isAndroid() then
         UIManager:show(InfoMessage:new{
@@ -1643,7 +1942,7 @@ function InkStain:_restartKOReader(source)
     self._koreader_restart_requested = true
     self:saveSettings()
     if Device and Device.saveSettings then pcall(Device.saveSettings, Device) end
-    local Event = require("ui/event")
+    if not Event then Event = require("ui/event") end
     UIManager:broadcastEvent(Event:new("Restart"))
     if tonumber(UIManager._exit_code) ~= 85 then
         UIManager:quit(85)
@@ -1652,6 +1951,8 @@ function InkStain:_restartKOReader(source)
 end
 
 function InkStain:_showUpdateCompleteDialog(version, allow_restart)
+    if not ConfirmBox then ConfirmBox = require("ui/widget/confirmbox") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     local dialog
     local buttons = {}
     if allow_restart ~= false then
@@ -1692,6 +1993,7 @@ function InkStain:_afterUpdateInstalled(manifest)
     if update.restart_mode == "never" then
         self:_showUpdateCompleteDialog(version, false)
     elseif update.restart_mode == "auto" then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
         UIManager:show(InfoMessage:new{
             text = _("更新完成，正在重启 KOReader"),
             timeout = 3,
@@ -1705,6 +2007,10 @@ function InkStain:_afterUpdateInstalled(manifest)
 end
 
 function InkStain:_presentUpdate(manifest, automatic)
+    self:_ensureUpdater()
+    if not self.ota then return end
+    if not ConfirmBox then ConfirmBox = require("ui/widget/confirmbox") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     if manifest.current then
         if not automatic then
             UIManager:show(InfoMessage:new{
@@ -1714,7 +2020,7 @@ function InkStain:_presentUpdate(manifest, automatic)
         end
         return
     end
-    -- Auto-check: skip if already prompted for this version
+    -- 自动检查：同一版本只提示一次
     local _, update = self:_updatePreferences()
     if automatic and tostring(update.last_prompted_version or "") == tostring(manifest.version or "") then
         return
@@ -1722,8 +2028,11 @@ function InkStain:_presentUpdate(manifest, automatic)
     update.last_prompted_version = tostring(manifest.version or "")
     self:_saveUpdatePreferences(update)
 
-    local text = _("发现") .. tostring(Updater.Config.UPDATE_CHANNEL_LABEL)
-        .. _("版本 ") .. tostring(manifest.version)
+    local channel_label = "稳定版"
+    if self._ota_config and self._ota_config.channel == "beta" then
+        channel_label = "测试版"
+    end
+    local text = _("发现") .. channel_label .. _("版本 ") .. tostring(manifest.version)
     local notes = tostring(manifest.summary or "")
     if notes == "" then notes = tostring(manifest.notes or "") end
     if notes ~= "" then text = text .. "\n\n更新内容\n" .. notes end
@@ -1733,7 +2042,7 @@ function InkStain:_presentUpdate(manifest, automatic)
         text = text,
         ok_text = _("下载并安装"),
         ok_callback = function()
-            local NetworkMgr = require("ui/network/manager")
+            if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
             if NetworkMgr and not NetworkMgr:isConnected() then
                 if NetworkMgr.willRereadConnect then
                     NetworkMgr:willRereadConnect(function()
@@ -1750,28 +2059,53 @@ function InkStain:_presentUpdate(manifest, automatic)
 end
 
 function InkStain:_downloadAndUpdate(manifest)
+    self:_ensureUpdater()
+    if not self.ota then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = self._ota_error or _("更新功能不可用"),
+            timeout = 5,
+        })
+        return
+    end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     UIManager:show(InfoMessage:new{
         text = _("正在后台下载并校验安装包……"),
         timeout = 0,
     })
     UIManager:scheduleIn(0.5, function()
-        local ok, result = pcall(function()
-            return self.updater:download(manifest)
-        end)
-        if not ok or not result or result == "" then
+        -- pcall 保护：防止 download() 内部抛出异常导致闪退/重启
+        local ok_dl, package_path, download_err = pcall(function() return self.ota:download(manifest) end)
+        if not ok_dl then
+            logger.warn("[InkStain] OTA download crashed:", package_path)
             UIManager:show(InfoMessage:new{
-                text = _("更新下载失败：\n") .. tostring(result or "后台下载失败"),
+                text = _("更新下载失败：\n") .. tostring(package_path or "未知错误"),
                 timeout = 5,
             })
             return
         end
-        local path = tostring(result)
+        if not package_path then
+            UIManager:show(InfoMessage:new{
+                text = _("更新下载失败：\n") .. tostring(download_err or "下载失败"),
+                timeout = 5,
+            })
+            return
+        end
         UIManager:show(InfoMessage:new{
             text = _("安装包校验完成，正在安装……"),
             timeout = 1,
         })
         UIManager:scheduleIn(0.5, function()
-            local install_ok, install_err = self.updater:install(path, manifest)
+            -- pcall 保护：防止 install() 内部抛出异常导致闪退/重启
+            local ok_inst, install_ok, install_err = pcall(function() return self.ota:install(package_path, manifest) end)
+            if not ok_inst then
+                logger.warn("[InkStain] OTA install crashed:", install_ok)
+                UIManager:show(InfoMessage:new{
+                    text = _("更新失败：\n") .. tostring(install_ok or "未知错误"),
+                    timeout = 0,
+                })
+                return
+            end
             if install_ok then
                 self:_afterUpdateInstalled(manifest)
             else
@@ -1784,41 +2118,36 @@ function InkStain:_downloadAndUpdate(manifest)
     end)
 end
 
-function InkStain:_runUpdateCheck(automatic, on_done)
-    UIManager:scheduleIn(0.5, function()
-        local ok, manifest = pcall(function()
-            return self.updater:check()
-        end)
-        if ok and type(manifest) == "table" then
-            if on_done then on_done(manifest, nil) end
-        else
-            if on_done then on_done(nil, tostring(manifest or "无法读取更新清单")) end
-        end
-    end)
-end
-
 function InkStain:maybeAutoCheckUpdate(force)
+    self:_ensureUpdater()
+    if not self.ota then return false end
     local _, update = self:_updatePreferences()
     if not force and update.auto_check == false then return false end
     if self._auto_update_check_running then return false end
     local now = os.time()
-    local interval = math.max(21600, tonumber(update.interval) or Updater.AUTO_UPDATE_INTERVAL)
+    local interval = math.max(OTA_MIN_INTERVAL, tonumber(update.interval) or OTA_DEFAULT_INTERVAL)
     local last = tonumber(update.last_attempt_at) or 0
     if not force and now - last < interval then return false end
-    local NetworkMgr = require("ui/network/manager")
+    if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
     if NetworkMgr and not NetworkMgr:isConnected() then return false end
     self._auto_update_check_running = true
     update.last_attempt_at = now
     self:_saveUpdatePreferences(update)
-    self:_runUpdateCheck(true, function(manifest, err)
+    UIManager:scheduleIn(0.5, function()
+        -- pcall 保护：防止 check() 内部抛出异常导致闪退/重启
+        local ok, manifest, err = pcall(function() return self.ota:check() end)
         self._auto_update_check_running = false
         local _, fresh = self:_updatePreferences()
-        if manifest then
+        if ok and type(manifest) == "table" then
             fresh.last_success_at = os.time()
             self:_saveUpdatePreferences(fresh)
             self:_presentUpdate(manifest, true)
         else
-            fresh.last_attempt_at = os.time() - math.max(0, interval - Updater.AUTO_UPDATE_RETRY_INTERVAL)
+            if not ok then
+                logger.warn("[InkStain] OTA auto-check crashed:", manifest)
+            end
+            -- 失败后缩短重试间隔（约间隔的 1/3）
+            fresh.last_attempt_at = os.time() - math.max(0, interval - OTA_MIN_INTERVAL)
             self:_saveUpdatePreferences(fresh)
         end
     end)
@@ -1826,33 +2155,85 @@ function InkStain:maybeAutoCheckUpdate(force)
 end
 
 function InkStain:checkForUpdate(automatic)
-    if automatic then return self:maybeAutoCheckUpdate(true) end
-    local NetworkMgr = require("ui/network/manager")
-    if NetworkMgr and not NetworkMgr:isConnected() then
-        if NetworkMgr.willRereadConnect then
-            NetworkMgr:willRereadConnect(function()
-                self:_manualCheckUpdate()
+    -- 最外层 pcall 兜底：任何 Lua 级别的错误都不会导致闪退
+    local ok, result = pcall(function()
+        if automatic then return self:maybeAutoCheckUpdate(true) end
+        self:_ensureUpdater()
+        if not self.ota then
+            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+            UIManager:show(InfoMessage:new{
+                text = self._ota_error or _("更新功能不可用"),
+                timeout = 5,
+            })
+            return false
+        end
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
+        if NetworkMgr and not NetworkMgr:isConnected() then
+            if NetworkMgr.willRereadConnect then
+                NetworkMgr:willRereadConnect(function()
+                    self:_manualCheckUpdate()
+                end)
+            else
+                UIManager:show(InfoMessage:new{ text = _("当前网络不可用"), timeout = 3 })
+            end
+            return false
+        end
+        self:_manualCheckUpdate()
+        return true
+    end)
+    if not ok then
+        logger.warn("[InkStain] checkForUpdate crashed:", result)
+        local ok2, InfoMessage2 = pcall(require, "ui/widget/infomessage")
+        if ok2 and InfoMessage2 then
+            pcall(function()
+                UIManager:show(InfoMessage2:new{
+                    text = _("检查更新失败：\n") .. tostring(result or "未知错误"),
+                    timeout = 5,
+                })
             end)
-        else
-            UIManager:show(InfoMessage:new{ text = _("当前网络不可用"), timeout = 3 })
         end
         return false
     end
-    self:_manualCheckUpdate()
-    return true
+    return result
 end
 
 function InkStain:_manualCheckUpdate()
+    self:_ensureUpdater()
+    if not self.ota then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = self._ota_error or _("更新功能不可用"),
+            timeout = 5,
+        })
+        return
+    end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+    local channel_label = "稳定版"
+    if self._ota_config and self._ota_config.channel == "beta" then
+        channel_label = "测试版"
+    end
     UIManager:show(InfoMessage:new{
-        text = _("正在后台检查") .. tostring(Updater.Config.UPDATE_CHANNEL_LABEL) .. _("版本……"),
+        text = _("正在后台检查") .. channel_label .. _("版本……"),
         timeout = 2,
     })
-    self:_runUpdateCheck(false, function(manifest, err)
+    UIManager:scheduleIn(0.5, function()
+        -- pcall 保护：防止 check() 内部抛出异常导致设备闪退/重启
+        local ok, manifest, err = pcall(function() return self.ota:check() end)
         local _, update = self:_updatePreferences()
         update.last_attempt_at = os.time()
-        if manifest then update.last_success_at = os.time() end
+        if ok and type(manifest) == "table" then update.last_success_at = os.time() end
         self:_saveUpdatePreferences(update)
-        if not manifest then
+        if not ok then
+            -- pcall 捕获到异常
+            logger.warn("[InkStain] OTA check crashed:", manifest)
+            UIManager:show(InfoMessage:new{
+                text = _("检查更新失败：\n") .. tostring(manifest or "未知错误"),
+                timeout = 5,
+            })
+            return
+        end
+        if type(manifest) ~= "table" then
             UIManager:show(InfoMessage:new{
                 text = _("检查更新失败：\n") .. tostring(err),
                 timeout = 5,
@@ -1864,6 +2245,8 @@ function InkStain:_manualCheckUpdate()
 end
 
 function InkStain:addToMainMenu(menu_items)
+    -- 菜单构建时预加载 InfoMessage（回调中大量使用）
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     menu_items.inkstain_wallpaper = {
         text = _("墨痕壁纸"),
         sorting_hint = "more_tools",
@@ -2101,6 +2484,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "zh"
                                     self:saveSettings()
+                                    if not i18n then i18n = require("i18n") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("壁纸语言已切换为简体中文。"), timeout = 3 })
                                 end,
@@ -2111,6 +2495,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "zh-HK"
                                     self:saveSettings()
+                                    if not i18n then i18n = require("i18n") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("壁紙語言已切換為繁體中文（香港）。"), timeout = 3 })
                                 end,
@@ -2121,6 +2506,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "en"
                                     self:saveSettings()
+                                    if not i18n then i18n = require("i18n") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("Wallpaper language switched to English."), timeout = 3 })
                                 end,
@@ -2191,12 +2577,7 @@ function InkStain:addToMainMenu(menu_items)
                     },
                 },
             },
-            -- ===== 关于与更新 =====
-            {
-                text = _("检查更新"),
-                separator = true,
-                sub_item_table_func = function() return self:updateSettingsMenu() end,
-            },
+            -- ===== 关于 =====
             {
                 text = T(_("关于（v%1）"), PLUGIN_VERSION),
                 callback = function()
