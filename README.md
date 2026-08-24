@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-3.0.0-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.5.7-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > 让每一次休眠，都留下一张属于自己的墨痕账单。
@@ -47,7 +47,7 @@
 
 ## 📸 效果预览
 
-<img width="200" alt="墨痕账单预览" src="./docs/preview.jpg" />
+<img width="369.2" height="514" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/85a21e15-c006-4c96-9b39-af5fd6536c3a" />
 
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
@@ -58,7 +58,7 @@
 
 ## 🔧 使用方法
 
-1. 下载 release 中的 `inkstain.koplugin-v3.0.0.zip`
+1. 下载 release 中的 `inkstain.koplugin-v3.5.7.zip`
 2. 解压后，将 `inkstain.koplugin` 文件夹复制到 KOReader 的 `plugins` 目录
 3. 重启 KOReader
 4. 打开 KOReader 顶部菜单，在插件菜单位置找到「墨痕壁纸」
@@ -97,7 +97,7 @@
 
 ## 📝 更新日志
 
-### v3.5.7
+### v3.5.7（2026.08）
 
 - ✅ Public API 升级至 v2：支持 MiuRead 查询状态、开启、关闭、刷新，并直接打开墨痕自己的原生设置界面
 - ✅ MiuRead 关闭墨痕后会真正解除锁屏接管并恢复原屏保
@@ -107,6 +107,47 @@
 - ✅ 自动检查改为延迟到主页且仅在联网时执行，并限制检查超时，避免启动阶段触发更新逻辑
 - ✅ OTA 继续使用 stable-channel、SHA-256 校验、安装前备份与失败回滚
 - ✅ “墨痕设置”由 InkStain 自己显示；检查更新、文件选择和多级菜单不再由 MiuRead 转发
+
+
+### v3.5.5（2026.08）
+
+- ✅ 修复 Top 书单中同一本书重复出现的问题：同一本书在 KOReader 中有多个副本（不同文件/反复导入）时会被当成多本书列出，现在按书名去重聚合，阅读时长相加、进度取最高值
+- ✅ 补全 `last_time` 字段（SQL 查询第 6 列此前被跳过）
+
+### v3.5.4（2026.08）
+
+- ✅ 移除主菜单中"检查更新"入口，避免部分设备因 OTA 模块兼容性问题导致闪退
+- ✅ 移除启动时自动检查更新调度，防止后台静默触发闪退
+- ✅ OTA 相关代码保留，后续稳定后可恢复入口
+
+### v3.5.3（2026.08）
+
+- ✅ 修复打开"检查更新"子菜单即闪退的问题：`_updatePreferences()` 中多余的 `_ensureUpdater()` 调用会在菜单构建时加载 C 扩展，导致部分设备 segfault
+- ✅ 自动检查更新默认关闭（opt-in），避免启动后悄悄触发 OTA 加载
+- ✅ 新增"手动下载地址"菜单项，OTA 不可用时仍可从 GitHub Releases 获取更新
+
+### v3.5.2（2026.08）
+
+- ✅ 用 KOReader 内置 `ssl.https`（LuaSec）替代 `os.execute("curl")` 下载，避免 fork 子进程在低内存设备上触发 OOM Killer 导致闪退/重启
+- ✅ 流式下载写入磁盘，避免大文件占用过多内存
+- ✅ `checkForUpdate` 最外层增加 pcall 兜底
+
+### v3.5.1（2026.08）
+
+- ✅ `ota:check()` / `ota:download()` / `ota:install()` 全部增加 `pcall` 包裹，捕获异常后显示友好错误信息
+- ✅ OTA 不可用时点击检查更新会显示具体原因，不再静默无响应
+
+### v3.5.0（2026.08）
+
+- ✅ 接入 PluginOTA 框架，替换原有 updater 实现
+- ✅ 新增 `ota_config.lua` 配置文件，支持 GitHub Release 渠道更新
+- ✅ 支持稳定版/测试版通道切换和 SHA256 哈希校验
+
+### v3.4.0（2026.08）
+
+- ✅ 全面优化启动速度，减少冗余模块加载
+- ✅ 锁屏唤醒卡顿优化：壁纸生成从休眠前移到关闭文档时触发，并增加周期性刷新
+- ✅ 修复觅阅阅读数据抓取不全的问题，对齐 v4.9.0 进度优先级逻辑
 
 
 ### v3.0.0（2026.08）
