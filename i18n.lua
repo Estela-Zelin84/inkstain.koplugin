@@ -103,7 +103,9 @@ function i18n.loadLang(plugin_path, lang)
         logger.warn("墨痕壁纸 i18n：无法加载语言包", lang)
         translations = {}
     else
-        logger.info("墨痕壁纸 i18n：已加载", lang, #translations, "条翻译")
+        local count = 0
+        for _ in pairs(translations) do count = count + 1 end
+        logger.info("墨痕壁纸 i18n：已加载", lang, count, "条翻译")
     end
 
     -- 构建翻译对象（可像函数一样调用，同时暴露原始翻译表）

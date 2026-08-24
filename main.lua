@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.5.5"
+local PLUGIN_VERSION = "3.5.7"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -85,6 +85,7 @@ local InkStain = WidgetContainer:extend{
     is_doc_only = false,
     settings_key = "inkstain_wallpaper",
     last_refresh_ts = 0,
+    api_version = 2,
 }
 
 local CODE128_PATTERNS = {
@@ -239,12 +240,18 @@ function InkStain:init()
     -- OTA：延迟到首次菜单访问时初始化，避免启动时加载 updater.lua（含 SHA-256 等重模块）
     self._updater_initialized = false
     self._auto_update_check_running = false
+    self._auto_update_check_task = nil
     -- 从设置中恢复上次刷新时间戳，避免重启后首次休眠强制生成
     self.last_refresh_ts = tonumber(self.settings.last_refresh_ts) or 0
     -- 周期刷新定时器：唤醒时按 refresh_interval 静默刷新壁纸
     -- 替代原休眠前生成模式，彻底解决休眠/唤醒卡顿
     self._periodic_timer_running = false
+    self._periodic_refresh_generation = 0
     self:_schedulePeriodicRefresh()
+    -- 3.5.7：自动更新继续延迟到 UI 稳定后执行，不在 init 中直接联网。
+    -- 延迟到 UI 稳定并回到主页后再检查，避免旧版本在启动阶段
+    -- 立即初始化/联网导致部分低内存设备闪退。
+    self:_scheduleAutoUpdateCheck(12)
 end
 
 function InkStain:saveSettings()
@@ -256,13 +263,20 @@ end
 
 --- 周期性静默刷新壁纸（设备唤醒时按 refresh_interval 执行）
 --  替代原休眠前生成模式，避免休眠/唤醒时的卡顿感
+function InkStain:_stopPeriodicRefresh()
+    self._periodic_refresh_generation = (tonumber(self._periodic_refresh_generation) or 0) + 1
+    self._periodic_timer_running = false
+end
+
 function InkStain:_schedulePeriodicRefresh()
     if self._periodic_timer_running then return end
     if not self.settings.auto_refresh_on_suspend then return end
     if not self.settings.auto_set_screensaver then return end
     local interval = self.settings.refresh_interval or 600
+    local generation = tonumber(self._periodic_refresh_generation) or 0
     self._periodic_timer_running = true
     UIManager:scheduleIn(interval, function()
+        if generation ~= (tonumber(self._periodic_refresh_generation) or 0) then return end
         self._periodic_timer_running = false
         if not self.settings.auto_refresh_on_suspend then return end
         if not self.settings.auto_set_screensaver then return end
@@ -281,9 +295,12 @@ function InkStain:_schedulePeriodicRefresh()
     end)
 end
 
---- 设备唤醒时重新调度周期刷新
+--- 设备唤醒时重新调度周期刷新，并在主页延迟检查更新。
 function InkStain:onResume()
     self:_schedulePeriodicRefresh()
+    if not (self.ui and self.ui.document) then
+        self:_scheduleAutoUpdateCheck(8)
+    end
 end
 
 --- 懒加载 OTA 模块：首次调用时 require pluginota.updater 并执行 startup() 确认
@@ -319,6 +336,7 @@ function InkStain:_ensureUpdater()
     local http_ok, https = pcall(require, "ssl.https")
     local ltn12_ok, ltn12 = pcall(require, "ltn12")
     local socket_ok = http_ok and ltn12_ok
+    self._ota_auto_transport_safe = socket_ok == true
     if not socket_ok then
         logger.warn("[InkStain] OTA: ssl.https not available, falling back to curl")
     end
@@ -394,6 +412,10 @@ function InkStain:_ensureUpdater()
         github_mirrors = OtaConfig.github_mirrors,
         http_get = http_get_func,
         http_download = http_download_func,
+        -- 自动检查只读取很小的 update.json，限制等待时间，避免弱网下长时间卡住主页。
+        connect_timeout = 4,
+        total_timeout = 8,
+        download_timeout = 180,
     }
     if not ota then
         logger.warn("[InkStain] OTA initialization failed:", err)
@@ -1592,10 +1614,8 @@ function InkStain:generate(quiet)
 end
 
 function InkStain:onSuspend()
-    -- 休眠前取消正在进行的自动更新检查标记
-    if self._auto_update_check_running then
-        self._auto_update_check_running = false
-    end
+    -- 休眠时取消尚未开始/正在执行的自动更新检查，避免网络任务跨越休眠。
+    self:_cancelAutoUpdateCheck("suspend")
     -- 快速路径：仅确保屏保设置正确，不做耗时的壁纸生成
     -- 生成已移至 onCloseDocument / 周期性定时器，避免休眠前卡顿
     if not self.settings.auto_set_screensaver then return end
@@ -1615,12 +1635,14 @@ function InkStain:onSuspend()
     end
     -- 确保屏保设置指向正确的文件
     if not self:isUsingInkStainScreensaver() then
-        self:applyScreensaver()
+        self:applyScreensaverSettings()
     end
 end
 
 --- 关闭文档后生成壁纸（此时阅读统计已更新，且不影响休眠响应速度）
 function InkStain:onCloseDocument()
+    -- 回到主页后是检查更新的安全时机；真正联网仍然延迟执行。
+    self:_scheduleAutoUpdateCheck(3)
     if not self.settings.auto_refresh_on_suspend then return end
     if not self.settings.auto_set_screensaver then return end
     local now = os.time()
@@ -1737,31 +1759,179 @@ function InkStain:setScreensaverScope(scope)
     })
 end
 
-function InkStain:disableWallpaper()
-    self.settings.auto_refresh_on_suspend = false
-    self.settings.auto_set_screensaver = false
-    self:saveSettings()
-
-    if self:isUsingInkStainScreensaver() then
-        self:restorePreviousScreensaverSettings()
-    end
-
-    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
-    UIManager:show(InfoMessage:new{
-        text = _("墨痕壁纸已关闭，并已停止休眠前自动刷新。"),
-        timeout = 4,
-    })
+local function external_quiet(opts)
+    return type(opts) == "table" and opts.quiet == true
 end
 
-function InkStain:enableFromNativeScreensaverMenu()
+--- Public API v1 ------------------------------------------------------------
+-- MiuRead and other plugins should use these methods instead of changing
+-- InkStain settings or KOReader screensaver keys directly.
+function InkStain:getApiVersion()
+    return self.api_version or 1
+end
+
+function InkStain:isEnabled()
+    return self.settings and self.settings.auto_set_screensaver == true
+end
+
+function InkStain:isActive()
+    return self:isUsingInkStainScreensaver() == true
+end
+
+function InkStain:getStatus()
+    return {
+        api_version = self:getApiVersion(),
+        version = PLUGIN_VERSION,
+        enabled = self:isEnabled(),
+        active = self:isActive(),
+        auto_refresh = self.settings and self.settings.auto_refresh_on_suspend == true,
+        scope = self.settings and self.settings.menu_scope or "home",
+        output_file = self.output_file,
+    }
+end
+
+function InkStain:enable(opts)
+    local quiet = external_quiet(opts)
+    local previous_auto_set = self.settings.auto_set_screensaver
+    local previous_auto_refresh = self.settings.auto_refresh_on_suspend
+
     self.settings.auto_set_screensaver = true
     self.settings.auto_refresh_on_suspend = true
     self:saveSettings()
-    return self:generate(false)
+
+    local ok = self:generate(true)
+    if not ok then
+        -- 开启失败时不要留下“设置显示已开启、实际没有壁纸”的半状态。
+        self.settings.auto_set_screensaver = previous_auto_set
+        self.settings.auto_refresh_on_suspend = previous_auto_refresh
+        self:saveSettings()
+        return false
+    end
+
+    self:_schedulePeriodicRefresh()
+    if not quiet then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = _("墨痕壁纸已开启。"),
+            timeout = 3,
+        })
+    end
+    return true
+end
+
+function InkStain:disable(opts)
+    local quiet = external_quiet(opts)
+    local was_active = self:isUsingInkStainScreensaver()
+
+    self.settings.auto_refresh_on_suspend = false
+    self.settings.auto_set_screensaver = false
+    self:_stopPeriodicRefresh()
+
+    if was_active then
+        self:restorePreviousScreensaverSettings()
+    else
+        -- 如果锁屏已被别的插件接管，不覆盖对方，只丢弃旧快照，避免下次
+        -- 再开启/关闭时恢复到过期的屏保配置。
+        self.settings.previous_screensaver = nil
+        self:saveSettings()
+    end
+
+    if not quiet then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = _("墨痕壁纸已关闭。"),
+            timeout = 3,
+        })
+    end
+    return true
+end
+
+function InkStain:refresh(opts)
+    return self:generate(external_quiet(opts))
+end
+
+--- 返回 InkStain 自己的完整设置树，供其他插件嵌入入口时使用。
+-- 设置仍由 InkStain 自己维护，调用方无需复制任何选项。
+function InkStain:getSettingsMenuItems()
+    local holder = {}
+    self:addToMainMenu(holder)
+    local entry = holder.inkstain_wallpaper
+    return entry and entry.sub_item_table or {}
+end
+
+--- Public API v2: return the plugin-owned settings tree.
+-- Kept as a compatibility alias for external callers that used the earlier name.
+function InkStain:getSettingsMenu()
+    return self:getSettingsMenuItems()
+end
+
+--- Public API v2: open InkStain's own native KOReader settings UI.
+-- External plugins should call this instead of copying/re-rendering our menu tree.
+function InkStain:openSettings(opts)
+    opts = type(opts) == "table" and opts or {}
+
+    if self._settings_menu_container and UIManager:isWidgetShown(self._settings_menu_container) then
+        return true
+    end
+
+    local ok_center, CenterContainer = pcall(require, "ui/widget/container/centercontainer")
+    local ok_touch, TouchMenu = pcall(require, "ui/widget/touchmenu")
+    if not ok_center or not CenterContainer or not ok_touch or not TouchMenu then
+        logger.warn("[InkStain] native settings UI unavailable", tostring(CenterContainer), tostring(TouchMenu))
+        return false, _("当前 KOReader 无法打开墨痕设置界面。")
+    end
+
+    local items = self:getSettingsMenuItems()
+    if type(items) ~= "table" or #items == 0 then
+        return false, _("墨痕设置为空。")
+    end
+
+    -- TouchMenu expects each tab to be both an item table and carry an icon.
+    -- Use a fresh array so opening the standalone UI never mutates the menu tree
+    -- registered with KOReader's own main menu.
+    local tab = { icon = "appbar.tools" }
+    for i, item in ipairs(items) do tab[i] = item end
+
+    local container = CenterContainer:new{
+        covers_header = true,
+        ignore = "height",
+        dimen = Screen:getSize(),
+    }
+    local menu = TouchMenu:new{
+        width = Screen:getWidth(),
+        last_index = 1,
+        tab_item_table = { tab },
+        show_parent = container,
+    }
+
+    menu.close_callback = function()
+        if self._settings_menu_container == container then
+            self._settings_menu_container = nil
+        end
+        if UIManager:isWidgetShown(container) then
+            UIManager:close(container)
+        end
+        if type(opts.on_close) == "function" then
+            pcall(opts.on_close)
+        end
+    end
+
+    container[1] = menu
+    self._settings_menu_container = container
+    UIManager:show(container)
+    return true
+end
+
+function InkStain:disableWallpaper()
+    return self:disable({ quiet = false, source = "inkstain" })
+end
+
+function InkStain:enableFromNativeScreensaverMenu()
+    return self:enable({ quiet = false, source = "native_screensaver" })
 end
 
 function InkStain:restoreFromNativeScreensaverMenu()
-    self:disableWallpaper()
+    return self:disable({ quiet = false, source = "native_screensaver" })
 end
 
 -- ===== OTA Update (基于 pluginota 通用框架) =====
@@ -1773,7 +1943,7 @@ local OTA_MIN_INTERVAL = 21600 -- 最短 6 小时（防止过于频繁）
 function InkStain:_updatePreferences()
     self.settings = self.settings or {}
     local defaults = {
-        auto_check = false,
+        auto_check = true,
         interval = OTA_DEFAULT_INTERVAL,
         last_attempt_at = 0,
         last_success_at = 0,
@@ -1880,6 +2050,11 @@ function InkStain:updateSettingsMenu()
                 local _, u = self:_updatePreferences()
                 u.auto_check = u.auto_check == false
                 self:_saveUpdatePreferences(u)
+                if u.auto_check then
+                    self:_scheduleAutoUpdateCheck(2)
+                else
+                    self:_cancelAutoUpdateCheck("disabled")
+                end
             end,
         },
         {
@@ -2118,40 +2293,83 @@ function InkStain:_downloadAndUpdate(manifest)
     end)
 end
 
+function InkStain:_cancelAutoUpdateCheck(reason)
+    if self._auto_update_check_task then
+        pcall(UIManager.unschedule, UIManager, self._auto_update_check_task)
+        self._auto_update_check_task = nil
+    end
+    if reason then
+        logger.info("[InkStain] OTA scheduled check cancelled:", tostring(reason))
+    end
+end
+
+function InkStain:_scheduleAutoUpdateCheck(delay)
+    local _, update = self:_updatePreferences()
+    if update.auto_check == false then return false end
+    if self._auto_update_check_running or self._auto_update_check_task then return false end
+
+    local interval = math.max(OTA_MIN_INTERVAL, tonumber(update.interval) or OTA_DEFAULT_INTERVAL)
+    local last = tonumber(update.last_attempt_at) or 0
+    if os.time() - last < interval then return false end
+
+    local task
+    task = function()
+        if self._auto_update_check_task ~= task then return end
+        self._auto_update_check_task = nil
+        -- 自动检查只在主页执行，不在阅读过程中突然联网或弹出更新提示。
+        if self.ui and self.ui.document then return end
+        self:maybeAutoCheckUpdate(false)
+    end
+    self._auto_update_check_task = task
+    UIManager:scheduleIn(tonumber(delay) or 8, task)
+    return true
+end
+
 function InkStain:maybeAutoCheckUpdate(force)
-    self:_ensureUpdater()
-    if not self.ota then return false end
     local _, update = self:_updatePreferences()
     if not force and update.auto_check == false then return false end
     if self._auto_update_check_running then return false end
+
     local now = os.time()
     local interval = math.max(OTA_MIN_INTERVAL, tonumber(update.interval) or OTA_DEFAULT_INTERVAL)
     local last = tonumber(update.last_attempt_at) or 0
     if not force and now - last < interval then return false end
+
     if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
     if NetworkMgr and not NetworkMgr:isConnected() then return false end
+
+    -- 3.5.7 仍沿用 3.5.5 的 ssl.https 网络层，不 fork curl/worker，避免
+    -- 低内存 Kindle/Kobo 因额外进程造成 OOM。区别是只在主页延迟执行。
+    self:_ensureUpdater()
+    if not self.ota then return false end
+    if self._ota_auto_transport_safe == false then
+        logger.warn("[InkStain] OTA auto-check skipped: ssl.https unavailable")
+        return false
+    end
+
     self._auto_update_check_running = true
     update.last_attempt_at = now
     self:_saveUpdatePreferences(update)
-    UIManager:scheduleIn(0.5, function()
-        -- pcall 保护：防止 check() 内部抛出异常导致闪退/重启
-        local ok, manifest, err = pcall(function() return self.ota:check() end)
-        self._auto_update_check_running = false
-        local _, fresh = self:_updatePreferences()
-        if ok and type(manifest) == "table" then
-            fresh.last_success_at = os.time()
-            self:_saveUpdatePreferences(fresh)
-            self:_presentUpdate(manifest, true)
-        else
-            if not ok then
-                logger.warn("[InkStain] OTA auto-check crashed:", manifest)
-            end
-            -- 失败后缩短重试间隔（约间隔的 1/3）
-            fresh.last_attempt_at = os.time() - math.max(0, interval - OTA_MIN_INTERVAL)
-            self:_saveUpdatePreferences(fresh)
-        end
-    end)
-    return true
+
+    local ok, manifest, err = pcall(function() return self.ota:check() end)
+    self._auto_update_check_running = false
+    local _, fresh = self:_updatePreferences()
+    if ok and type(manifest) == "table" then
+        fresh.last_success_at = os.time()
+        self:_saveUpdatePreferences(fresh)
+        self:_presentUpdate(manifest, true)
+        return true
+    end
+
+    if not ok then
+        logger.warn("[InkStain] OTA auto-check crashed:", tostring(manifest))
+    else
+        logger.warn("[InkStain] OTA auto-check failed:", tostring(err or "unknown error"))
+    end
+    -- 失败后最早 6 小时再尝试，避免断网/线路异常时频繁请求。
+    fresh.last_attempt_at = os.time() - math.max(0, interval - OTA_MIN_INTERVAL)
+    self:_saveUpdatePreferences(fresh)
+    return false
 end
 
 function InkStain:checkForUpdate(automatic)
@@ -2255,10 +2473,7 @@ function InkStain:addToMainMenu(menu_items)
             {
                 text = _("生成并设为休眠壁纸"),
                 callback = function()
-                    self.settings.auto_set_screensaver = true
-                    self.settings.auto_refresh_on_suspend = true
-                    self:saveSettings()
-                    self:generate(false)
+                    self:enable({ quiet = false, source = "inkstain_menu" })
                 end,
             },
             {
@@ -2532,6 +2747,9 @@ function InkStain:addToMainMenu(menu_items)
                         end,
                         callback = function()
                             self:toggleSetting("auto_refresh_on_suspend")
+                            if self.settings.auto_refresh_on_suspend and self.settings.auto_set_screensaver then
+                                self:_schedulePeriodicRefresh()
+                            end
                         end,
                     },
                     {
@@ -2540,7 +2758,11 @@ function InkStain:addToMainMenu(menu_items)
                             return self.settings.auto_set_screensaver
                         end,
                         callback = function()
-                            self:toggleSetting("auto_set_screensaver")
+                            if self:isEnabled() then
+                                self:disable({ quiet = false, source = "inkstain_menu" })
+                            else
+                                self:enable({ quiet = false, source = "inkstain_menu" })
+                            end
                         end,
                     },
                     {
@@ -2565,6 +2787,12 @@ function InkStain:addToMainMenu(menu_items)
                                 end,
                             },
                         },
+                    },
+                    {
+                        text = _("软件更新"),
+                        sub_item_table_func = function()
+                            return self:updateSettingsMenu()
+                        end,
                     },
                     {
                         text = _("显示输出路径"),

@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-3.5.5-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.0.0-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > 让每一次休眠，都留下一张属于自己的墨痕账单。
@@ -35,7 +35,7 @@
 - 🧹 **旧图自动清理**：生成新壁纸时清理插件输出目录里的旧图片
 - 🛡️ **原生屏保保护**：启用前备份 KOReader 原生屏保设置，关闭后可恢复
 - 🏠 **使用范围控制**：可选择只在主页使用，避免干涉阅读界面的独立屏保设置
-- 🌐 **在线更新**：插件内一键检查 GitHub Release 新版本，支持下载并自动安装（v3.5.4 起因部分设备兼容性问题暂时关闭入口）
+- 🌐 **在线更新**：插件内一键检查 GitHub Release 新版本，支持下载并自动安装
 - 🔒 **OTA 哈希验证**：下载完成后自动校验 SHA256，防止文件损坏或篡改
 - 🌍 **GitHub 镜像加速**：内置三个镜像，国内设备下载不再超时
 - 🖼️ **PNG 渲染输出**：使用 KOReader 自带文字渲染组件生成 PNG，避免 SVG 文字空白问题
@@ -47,7 +47,7 @@
 
 ## 📸 效果预览
 
-<img width="369.2" height="514" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/85a21e15-c006-4c96-9b39-af5fd6536c3a" />
+<img width="200" alt="墨痕账单预览" src="./docs/preview.jpg" />
 
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
@@ -58,7 +58,7 @@
 
 ## 🔧 使用方法
 
-1. 下载 release 中的 `inkstain.koplugin-v3.5.5.zip`
+1. 下载 release 中的 `inkstain.koplugin-v3.0.0.zip`
 2. 解压后，将 `inkstain.koplugin` 文件夹复制到 KOReader 的 `plugins` 目录
 3. 重启 KOReader
 4. 打开 KOReader 顶部菜单，在插件菜单位置找到「墨痕壁纸」
@@ -93,48 +93,31 @@
 | 进度模式 | 总进度（全期阅读位置）或本期进度（本期阅读页数占比） |
 | 壁纸语言 | 中文或英文壁纸渲染 |
 | 显示输出路径 | 查看当前壁纸输出位置 |
+| 检查更新 | 检查 GitHub Release 新版本并在线安装 |
 
 ## 📝 更新日志
 
-### v3.5.5（2026.08）
+### v3.5.7
 
-- ✅ 修复 Top 书单中同一本书重复出现的问题：同一本书在 KOReader 中有多个副本（不同文件/反复导入）时会被当成多本书列出，现在按书名去重聚合，阅读时长相加、进度取最高值
-- ✅ 补全 `last_time` 字段（SQL 查询第 6 列此前被跳过）
+- ✅ Public API 升级至 v2：支持 MiuRead 查询状态、开启、关闭、刷新，并直接打开墨痕自己的原生设置界面
+- ✅ MiuRead 关闭墨痕后会真正解除锁屏接管并恢复原屏保
+- ✅ 关闭“自动设置 KOReader 休眠屏幕”时同步解除当前墨痕锁屏
+- ✅ 修复休眠兜底路径调用错误函数的问题
+- ✅ 恢复“软件更新”入口，并接入安全的自动更新检查
+- ✅ 自动检查改为延迟到主页且仅在联网时执行，并限制检查超时，避免启动阶段触发更新逻辑
+- ✅ OTA 继续使用 stable-channel、SHA-256 校验、安装前备份与失败回滚
+- ✅ “墨痕设置”由 InkStain 自己显示；检查更新、文件选择和多级菜单不再由 MiuRead 转发
 
-### v3.5.4（2026.08）
 
-- ✅ 移除主菜单中"检查更新"入口，避免部分设备因 OTA 模块兼容性问题导致闪退
-- ✅ 移除启动时自动检查更新调度，防止后台静默触发闪退
-- ✅ OTA 相关代码保留，后续稳定后可恢复入口
+### v3.0.0（2026.08）
 
-### v3.5.3（2026.08）
-
-- ✅ 修复打开"检查更新"子菜单即闪退的问题：`_updatePreferences()` 中多余的 `_ensureUpdater()` 调用会在菜单构建时加载 C 扩展，导致部分设备 segfault
-- ✅ 自动检查更新默认关闭（opt-in），避免启动后悄悄触发 OTA 加载
-- ✅ 新增"手动下载地址"菜单项，OTA 不可用时仍可从 GitHub Releases 获取更新
-
-### v3.5.2（2026.08）
-
-- ✅ 用 KOReader 内置 `ssl.https`（LuaSec）替代 `os.execute("curl")` 下载，避免 fork 子进程在低内存设备上触发 OOM Killer 导致闪退/重启
-- ✅ 流式下载写入磁盘，避免大文件占用过多内存
-- ✅ `checkForUpdate` 最外层增加 pcall 兜底
-
-### v3.5.1（2026.08）
-
-- ✅ `ota:check()` / `ota:download()` / `ota:install()` 全部增加 `pcall` 包裹，捕获异常后显示友好错误信息
-- ✅ OTA 不可用时点击检查更新会显示具体原因，不再静默无响应
-
-### v3.5.0（2026.08）
-
-- ✅ 接入 PluginOTA 框架，替换原有 updater 实现
-- ✅ 新增 `ota_config.lua` 配置文件，支持 GitHub Release 渠道更新
-- ✅ 支持稳定版/测试版通道切换和 SHA256 哈希校验
-
-### v3.4.0（2026.08）
-
-- ✅ 全面优化启动速度，减少冗余模块加载
-- ✅ 锁屏唤醒卡顿优化：壁纸生成从休眠前移到关闭文档时触发，并增加周期性刷新
-- ✅ 修复觅阅阅读数据抓取不全的问题，对齐 v4.9.0 进度优先级逻辑
+- ✅ 修复切换壁纸语言后生成壁纸闪退（`pickQuote` 参数错误）
+- ✅ 修复觅阅阅读记录不显示：补充读取 `library`（本地书库），不再仅依赖 `shelf_cache`（云端书架）
+- ✅ 修复觅阅进度取值不完整：对齐觅阅 `local_progress` 逻辑，补全 `pending`/`verified` 进度字段
+- ✅ 重构壁纸本地化为 .po 语言包系统（仿 ZenUI 插件方案）
+- ✅ 新增 `locales/zh.po` 和 `locales/en.po`，纯文本 .po 文件，无需编译
+- ✅ 新增 `i18n.lua` 模块：运行时纯 Lua 解析 .po，带缓存和回退
+- ✅ 移除硬编码 `WALLPAPER_I18N` 对照表，所有壁纸文本由 .po 文件驱动
 
 ### v2.0.9（2026.08）
 

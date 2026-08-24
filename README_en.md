@@ -97,6 +97,13 @@ The plugin uses KOReader's single-image screensaver mode:
 
 ## 📝 Changelog
 
+### v3.5.7
+
+- ✅ Public API v2 adds status, enable/disable, refresh, and a native `openSettings()` entry for MiuRead
+- ✅ InkStain now owns its full settings UI when opened from MiuRead; OTA, file pickers, and nested menus are no longer proxied by MiuRead
+- ✅ Disabling InkStain fully releases the sleep-screen takeover and restores the previous screensaver
+- ✅ Restored the software update entry with delayed, network-aware update checks and safe OTA verification/rollback
+
 ### v3.0.0 (2026.08)
 
 - ✅ Fixed crash when generating wallpaper after switching wallpaper language (`pickQuote` parameter error)
