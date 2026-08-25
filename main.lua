@@ -2467,7 +2467,7 @@ function InkStain:addToMainMenu(menu_items)
     if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     menu_items.inkstain_wallpaper = {
         text = _("墨痕壁纸"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table = {
             -- ===== 操作区 =====
             {
