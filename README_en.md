@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/License-GPL--3.0-12B7F5?style=for-the-badge)
 ![KOReader](https://img.shields.io/badge/KOReader-Plugin-555555?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-3.0.0-12B7F5?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.5.7-12B7F5?style=for-the-badge)
 ![Tested](https://img.shields.io/badge/Tested-KPW4-12B7F5?style=for-the-badge)
 
 > Turn every sleep screen into a small imprint of your reading life.
@@ -58,7 +58,7 @@ The wallpaper uses an ink-stain style layout with four main areas:
 
 ## 🔧 Usage
 
-1. Download `inkstain.koplugin-v3.0.0.zip` from the release page
+1. Download `inkstain.koplugin-v3.5.7.zip` from the release page
 2. Unzip it and copy the `inkstain.koplugin` folder to KOReader's `plugins` directory
 3. Restart KOReader
 4. Open KOReader's top menu and find `墨痕壁纸` in the plugin menu
@@ -96,6 +96,13 @@ The plugin uses KOReader's single-image screensaver mode:
 | 检查更新 | Check for new GitHub Release versions and install |
 
 ## 📝 Changelog
+
+### v3.5.7 (2026.08)
+
+- ✅ Public API v2 adds status, enable/disable, refresh, and a native `openSettings()` entry for MiuRead
+- ✅ InkStain now owns its full settings UI when opened from MiuRead; OTA, file pickers, and nested menus are no longer proxied by MiuRead
+- ✅ Disabling InkStain fully releases the sleep-screen takeover and restores the previous screensaver
+- ✅ Restored the software update entry with delayed, network-aware update checks and safe OTA verification/rollback
 
 ### v3.0.0 (2026.08)
 

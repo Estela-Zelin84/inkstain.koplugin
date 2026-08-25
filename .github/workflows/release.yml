@@ -1,0 +1,142 @@
+name: Release InkStain
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: inkstain-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PLUGIN_DIR: "inkstain.koplugin"
+  PACKAGE_PREFIX: "inkstain.koplugin"
+  CHANNEL_TAG: "stable-channel"
+  RELEASE_CHANNEL: "stable"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate tag and plugin version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python - <<'PY'
+          import re
+          from pathlib import Path
+          text=Path('_meta.lua').read_text(encoding='utf-8')
+          m=re.search(r'\bversion\s*=\s*["\x27]([^"\x27]+)["\x27]', text)
+          if not m:
+              raise SystemExit('No literal version in _meta.lua')
+          print(m.group(1))
+          PY
+          )"
+          EXPECTED="v${VERSION}"
+          if [ "${GITHUB_REF_NAME}" != "${EXPECTED}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match _meta.lua version ${VERSION}"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build full package and manifest
+        run: |
+          python scripts/build_release.py \
+            --plugin-dir "$PLUGIN_DIR" \
+            --package-prefix "$PACKAGE_PREFIX" \
+            --repo "$GITHUB_REPOSITORY" \
+            --channel "$RELEASE_CHANNEL" \
+            --output dist
+          echo "PACKAGE_NAME=$(cat dist/package_name.txt)" >> "$GITHUB_ENV"
+
+      - name: Verify local package
+        run: |
+          python scripts/verify_release.py \
+            --package "dist/$PACKAGE_NAME" \
+            --manifest dist/update.json \
+            --plugin-dir "$PLUGIN_DIR" \
+            --version "$VERSION"
+
+      - name: Publish version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "dist/$PACKAGE_NAME" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "dist/$PACKAGE_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+
+      - name: Verify public version package
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${PACKAGE_NAME}"
+          EXPECTED="$(python - <<'PY'
+          import json
+          print(json.load(open('dist/update.json', encoding='utf-8'))['sha256'])
+          PY
+          )"
+          for i in 1 2 3 4 5 6; do
+            if curl -fL --retry 2 --connect-timeout 15 --max-time 120 "$URL" -o /tmp/inkstain-release.zip; then
+              ACTUAL="$(sha256sum /tmp/inkstain-release.zip | awk '{print $1}')"
+              if [ "$ACTUAL" = "$EXPECTED" ]; then
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "Public package verification failed"
+          exit 1
+
+      - name: Publish stable channel manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$CHANNEL_TAG" >/dev/null 2>&1; then
+            gh release create "$CHANNEL_TAG" \
+              --title "InkStain stable channel" \
+              --notes "Fixed OTA channel manifest. Do not delete this release." \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload "$CHANNEL_TAG" dist/update.json --clobber
+
+      - name: Verify public stable manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${CHANNEL_TAG}/update.json"
+          for i in 1 2 3 4 5 6; do
+            if curl -fL --retry 2 --connect-timeout 15 --max-time 60 "$URL" -o /tmp/update.json; then
+              python - <<'PY'
+          import json
+          local=json.load(open('dist/update.json', encoding='utf-8'))
+          public=json.load(open('/tmp/update.json', encoding='utf-8'))
+          for key in ('schema','plugin','version','channel','package_type','package_url','size','sha256'):
+              assert public.get(key) == local.get(key), f'manifest mismatch: {key}'
+          print('public stable manifest verified')
+          PY
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Public stable manifest verification failed"
+          exit 1
