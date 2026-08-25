@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.5.7"
+local PLUGIN_VERSION = "3.5.8"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -248,10 +248,9 @@ function InkStain:init()
     self._periodic_timer_running = false
     self._periodic_refresh_generation = 0
     self:_schedulePeriodicRefresh()
-    -- 3.5.7：自动更新继续延迟到 UI 稳定后执行，不在 init 中直接联网。
-    -- 延迟到 UI 稳定并回到主页后再检查，避免旧版本在启动阶段
-    -- 立即初始化/联网导致部分低内存设备闪退。
-    self:_scheduleAutoUpdateCheck(12)
+    -- 3.5.8：移除 init 中的 _scheduleAutoUpdateCheck 调用。
+    -- 启动后立即调度 OTA 检查会导致 ssl.https/json/sha256 等重模块在
+    -- UI 尚未稳定时加载，造成启动卡顿。OTA 检查改为仅在用户主动操作时触发。
 end
 
 function InkStain:saveSettings()
@@ -289,18 +288,20 @@ function InkStain:_schedulePeriodicRefresh()
             self:_schedulePeriodicRefresh()
             return
         end
-        -- 后台静默生成，不显示提示
-        self:generate(true)
+        -- 3.5.8：用 nextTick 延迟生成，避免阻塞 UI 线程
+        UIManager:nextTick(function()
+            if generation ~= (tonumber(self._periodic_refresh_generation) or 0) then return end
+            self:generate(true)
+        end)
         self:_schedulePeriodicRefresh()
     end)
 end
 
---- 设备唤醒时重新调度周期刷新，并在主页延迟检查更新。
+--- 设备唤醒时重新调度周期刷新。
 function InkStain:onResume()
     self:_schedulePeriodicRefresh()
-    if not (self.ui and self.ui.document) then
-        self:_scheduleAutoUpdateCheck(8)
-    end
+    -- 3.5.8：移除 onResume 中的 _scheduleAutoUpdateCheck 调用。
+    -- 唤醒后立即调度 OTA 检查会加载重模块，造成唤醒后卡顿。
 end
 
 --- 懒加载 OTA 模块：首次调用时 require pluginota.updater 并执行 startup() 确认
@@ -1616,24 +1617,12 @@ end
 function InkStain:onSuspend()
     -- 休眠时取消尚未开始/正在执行的自动更新检查，避免网络任务跨越休眠。
     self:_cancelAutoUpdateCheck("suspend")
-    -- 快速路径：仅确保屏保设置正确，不做耗时的壁纸生成
-    -- 生成已移至 onCloseDocument / 周期性定时器，避免休眠前卡顿
+    -- 3.5.8：休眠时绝不生成壁纸——同步 generate() 会阻塞休眠流程，
+    -- 导致设备"卡死"无法唤醒。壁纸应由 onCloseDocument / 周期定时器负责更新。
+    -- 休眠时只做最轻量的事：确保屏保设置指向正确的文件。
     if not self.settings.auto_set_screensaver then return end
     if not self:shouldApplyInCurrentContext() then return end
-    -- 如果壁纸文件不存在（首次安装），快速生成一次
-    if not lfs.attributes(self.output_file, "mode") then
-        self:generate(true)
-        return
-    end
-    -- 如果距上次刷新已超过刷新间隔的 3 倍，做一次保底生成
-    -- （正常情况下 onCloseDocument 和周期定时器会负责更新）
-    local now = os.time()
-    local interval = self.settings.refresh_interval or 600
-    if self:isUsingInkStainScreensaver() and now - (self.last_refresh_ts or 0) > interval * 3 then
-        self:generate(true)
-        return
-    end
-    -- 确保屏保设置指向正确的文件
+    -- 确保屏保设置指向正确的文件（不做任何生成）
     if not self:isUsingInkStainScreensaver() then
         self:applyScreensaverSettings()
     end
@@ -1641,14 +1630,22 @@ end
 
 --- 关闭文档后生成壁纸（此时阅读统计已更新，且不影响休眠响应速度）
 function InkStain:onCloseDocument()
-    -- 回到主页后是检查更新的安全时机；真正联网仍然延迟执行。
-    self:_scheduleAutoUpdateCheck(3)
+    -- 3.5.8：移除 _scheduleAutoUpdateCheck 调用——每次关闭文档都触发 OTA 检查
+    -- 会导致频繁加载 OTA 模块（ssl.https/json/sha256），造成卡顿。
+    -- OTA 自动检查仅在 init 时延迟调度一次，不在阅读过程中反复触发。
     if not self.settings.auto_refresh_on_suspend then return end
     if not self.settings.auto_set_screensaver then return end
     local now = os.time()
     -- 关闭文档时的刷新间隔短一些（300 秒），避免频繁翻页关闭时重复生成
     if now - (self.last_refresh_ts or 0) < 300 then return end
-    self:generate(true)
+    -- 3.5.8：延迟 0.5 秒生成，避免阻塞文档关闭动画
+    -- 使用 generation 机制确保旧任务可被取消
+    self._periodic_refresh_generation = (tonumber(self._periodic_refresh_generation) or 0) + 1
+    local gen = self._periodic_refresh_generation
+    UIManager:scheduleIn(0.5, function()
+        if gen ~= (tonumber(self._periodic_refresh_generation) or 0) then return end
+        self:generate(true)
+    end)
 end
 
 function InkStain:toggleSetting(key)
@@ -2467,7 +2464,7 @@ function InkStain:addToMainMenu(menu_items)
     if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
     menu_items.inkstain_wallpaper = {
         text = _("墨痕壁纸"),
-        sorting_hint = "tools",
+        sorting_hint = "more_tools",
         sub_item_table = {
             -- ===== 操作区 =====
             {
