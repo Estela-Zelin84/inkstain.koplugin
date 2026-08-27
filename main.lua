@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.5.8.1"
+local PLUGIN_VERSION = "3.6.0"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -56,6 +56,7 @@ local DEFAULT_SETTINGS = {
     show_stains = false,  -- 墨水污渍效果（默认关闭，防止低性能设备卡顿）
     bg_mode = "white",  -- "white" 白底 / "image" 自定义图片
     bg_image_path = "",  -- 自定义背景图片路径
+    low_memory_mode = false,  -- 轻量模式：降低分辨率、跳过重计算（低内存设备推荐）
 }
 
 local SCREENSAVER_SETTING_KEYS = {
@@ -217,19 +218,26 @@ function InkStain:init()
     self.legacy_output_dir = DataStorage:getDataDir() .. "/screensaver/inkstain"
     self.db_location = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
     -- 字体复制：仅在目标文件不存在时执行（首次安装）
+    -- 分块复制（每块 64KB），避免一次性读取 24MB 字体文件导致低内存设备 OOM
     local font_src = (self.path or "") .. "/assets/" .. PLUGIN_FONT_NAME
     local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
     if lfs.attributes(font_src, "mode") == "file" and not lfs.attributes(font_dest, "mode") then
+        local CHUNK_SIZE = 64 * 1024  -- 64KB
         local src_f = io.open(font_src, "rb")
         if src_f then
-            local content = src_f:read("*a")
-            src_f:close()
             local dest_f = io.open(font_dest, "wb")
             if dest_f then
-                dest_f:write(content)
+                while true do
+                    local chunk = src_f:read(CHUNK_SIZE)
+                    if not chunk then break end
+                    dest_f:write(chunk)
+                end
                 dest_f:close()
                 logger.info("墨痕壁纸：已复制字体到", font_dest)
+            else
+                logger.warn("墨痕壁纸：字体目标文件无法写入", font_dest)
             end
+            src_f:close()
         end
     end
     if self.ui and self.ui.menu then
@@ -902,17 +910,26 @@ local function getFontFace(size, font_name)
     -- 回退到内置字体
     local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
     if lfs.attributes(font_dest, "mode") == "file" then
-        local face = Font:getFace(PLUGIN_FONT_NAME, sz)
-        if face then return face end
+        local ok_builtin, face_builtin = pcall(Font.getFace, Font, PLUGIN_FONT_NAME, sz)
+        if ok_builtin and face_builtin then return face_builtin end
     end
-    return Font:getFace("cfont", sz)
+    -- 最终回退到系统字体
+    local ok_sys, face_sys = pcall(Font.getFace, Font, "cfont", sz)
+    if ok_sys and face_sys then return face_sys end
+    -- 极端情况：返回 nil 让调用方处理
+    return nil
 end
 
 local function drawText(bb, text, x, y, size, bold, max_width, align, color)
     if not TextWidget then TextWidget = require("ui/widget/textwidget") end
+    local face = getFontFace(size)
+    if not face then
+        -- 字体加载失败，返回空尺寸，避免崩溃
+        return { w = 0, h = 0 }
+    end
     local widget = TextWidget:new{
         text = tostring(text or ""),
-        face = getFontFace(size),
+        face = face,
         bold = bold and true or false,
         fgcolor = color or Blitbuffer.COLOR_BLACK,
         max_width = max_width,
@@ -1254,6 +1271,12 @@ function InkStain:buildPng(stats)
         w, h = 824, 1200
     end
 
+    -- 轻量模式：降低分辨率以减少内存占用
+    if self.settings.low_memory_mode then
+        w = math.floor(w * 0.6)
+        h = math.floor(h * 0.6)
+    end
+
     local bb = Blitbuffer.new(w, h, Screen.bb:getType())
     bb:fill(Blitbuffer.COLOR_WHITE)
 
@@ -1284,16 +1307,32 @@ function InkStain:buildPng(stats)
         end
     end
 
-    -- 墨水污渍效果
-    if self.settings.show_stains then
+    -- 墨水污渍效果（轻量模式下跳过，减少绘制开销）
+    if self.settings.show_stains and not self.settings.low_memory_mode then
         -- 用日期作为种子，同一天的污渍一致
         local stain_seed = os.date("%Y%m%d") + (stats.total_seconds or 0) % 1000
         drawInkStains(bb, w, h, stain_seed, 1.0)
     end
 
     local lang = self.settings.wallpaper_lang or "zh"
-    if not i18n then i18n = require("i18n") end
-    local T = i18n.loadLang(self.path, lang)
+    -- 3.5.9：用 dofile 加载插件本地 i18n.lua，避免 require("i18n") 命中
+    -- KOReader 自带的 i18n 模块（缺少 loadLang/getQuotes 导致崩溃）
+    if not i18n then
+        local ok_i18n, mod = pcall(dofile, self.path .. "/i18n.lua")
+        if ok_i18n and type(mod) == "table" then
+            i18n = mod
+        else
+            logger.warn("[InkStain] i18n.lua 加载失败:", mod)
+        end
+    end
+    local T
+    if i18n and i18n.loadLang then
+        T = i18n.loadLang(self.path, lang)
+    end
+    if not T then
+        -- 回退：空翻译函数，返回空字符串
+        T = function() return "" end
+    end
 
     local scale = math.min(w / 600, h / 800)
     local margin_x = math.max(20, math.floor(w * 0.05))
@@ -1440,7 +1479,10 @@ function InkStain:buildPng(stats)
 
     local footer_y = chart_top + chart_h + math.max(26, math.floor(26 * scale))
     local qr_path = (self.path or "") .. "/assets/github_qr.png"
-    if not drawImage(bb, qr_path, margin_x, footer_y, qr_size) then
+    -- 轻量模式：跳过 QR 图片文件加载，直接用伪二维码绘制（减少 I/O 和内存）
+    if not self.settings.low_memory_mode and drawImage(bb, qr_path, margin_x, footer_y, qr_size) then
+        -- QR 图片加载成功
+    else
         drawPseudoQR(bb, margin_x, footer_y, qr_size, os.date("%Y%m%d", stats.end_ts - 1))
     end
     local barcode_y = footer_y
@@ -1665,50 +1707,57 @@ end
 
 --- 设置自定义壁纸字体（文件选择器）
 function InkStain:setCustomFont()
-    if not PathChooser then PathChooser = require("ui/widget/pathchooser") end
-    if not Font then Font = require("ui/font") end
+    if not InputDialog then InputDialog = require("ui/widget/inputdialog") end
     if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
-    -- 默认从 KOReader 字体目录开始
-    local start_dir = FontList.fontdir or "/"
-    if self.settings.font_name and self.settings.font_name ~= "" then
-        -- 如果已有字体，尝试找到它的目录
-        local font_file = FontList.fontdir .. "/" .. self.settings.font_name
-        if lfs.attributes(font_file, "mode") == "file" then
-            start_dir = FontList.fontdir
-        end
-    end
-
-    local path_chooser = PathChooser:new{
-        title = _("选择字体文件"),
-        select_file = true,
-        select_directory = false,
-        show_files = true,
-        detailed_file_info = true,
-        path = start_dir,
-        file_filter = function(filename)
-            local lower = filename:lower()
-            return lower:match("%.ttf$") or lower:match("%.otf$") or lower:match("%.ttc$")
-        end,
-        onConfirm = function(path)
-            if path and lfs.attributes(path, "mode") == "file" then
-                local basename = path:match("([^/]+)$") or path
-                -- 尝试加载验证
-                local ok_face, _ = pcall(Font.getFace, Font, basename, 24)
-                if not ok_face then
-                    -- 如果文件名加载失败，试试完整路径
-                    ok_face, _ = pcall(Font.getFace, Font, path, 24)
-                end
-                if ok_face then
-                    self.settings.font_name = basename
+    local current = self.settings.font_name or ""
+    local hint = _("输入字体文件名（如 NotoSansCJKsc-Regular.otf）\n留空则使用内置汇文明朝体。\n字体文件需位于 KOReader 字体目录中。")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("壁纸字体"),
+        input = current,
+        input_hint = hint,
+        description = _("当前：") .. (current ~= "" and current or _("内置字体")),
+        buttons = {{
+            {
+                text = _("取消"),
+                callback = function()
+                    UIManager:close(dialog)
+                end,
+            },
+            {
+                text = _("内置字体"),
+                callback = function()
+                    self.settings.font_name = ""
                     self:saveSettings()
-                    UIManager:show(InfoMessage:new{ text = _("壁纸字体已设置为：") .. basename, timeout = 3 })
-                else
-                    UIManager:show(InfoMessage:new{ text = _("字体加载失败，请选择有效字体文件。"), timeout = 4 })
-                end
-            end
-        end,
+                    UIManager:close(dialog)
+                    UIManager:show(InfoMessage:new{ text = _("已切换为内置字体。"), timeout = 3 })
+                end,
+            },
+            {
+                text = _("确认"),
+                is_enter_default = true,
+                callback = function()
+                    local text = dialog:getInputText()
+                    text = text and text:gsub("^%s+", ""):gsub("%s+$", "") or ""
+                    if text == "" then
+                        self.settings.font_name = ""
+                        self:saveSettings()
+                        UIManager:close(dialog)
+                        UIManager:show(InfoMessage:new{ text = _("已切换为内置字体。"), timeout = 3 })
+                    else
+                        -- 提取文件名（防止用户输入了完整路径）
+                        local basename = text:match("([^/]+)$") or text
+                        self.settings.font_name = basename
+                        self:saveSettings()
+                        UIManager:close(dialog)
+                        UIManager:show(InfoMessage:new{ text = _("壁纸字体已设置为：") .. basename, timeout = 3 })
+                    end
+                end,
+            },
+        }},
     }
-    UIManager:show(path_chooser)
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 --- 设置自定义背景图片（文件选择器）
@@ -2696,7 +2745,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "zh"
                                     self:saveSettings()
-                                    if not i18n then i18n = require("i18n") end
+                                    if not i18n then i18n = dofile(self.path .. "/i18n.lua") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("壁纸语言已切换为简体中文。"), timeout = 3 })
                                 end,
@@ -2707,7 +2756,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "zh-HK"
                                     self:saveSettings()
-                                    if not i18n then i18n = require("i18n") end
+                                    if not i18n then i18n = dofile(self.path .. "/i18n.lua") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("壁紙語言已切換為繁體中文（香港）。"), timeout = 3 })
                                 end,
@@ -2718,7 +2767,7 @@ function InkStain:addToMainMenu(menu_items)
                                 callback = function()
                                     self.settings.wallpaper_lang = "en"
                                     self:saveSettings()
-                                    if not i18n then i18n = require("i18n") end
+                                    if not i18n then i18n = dofile(self.path .. "/i18n.lua") end
                                     i18n.clearCache()
                                     UIManager:show(InfoMessage:new{ text = _("Wallpaper language switched to English."), timeout = 3 })
                                 end,
@@ -2784,6 +2833,19 @@ function InkStain:addToMainMenu(menu_items)
                                 end,
                             },
                         },
+                    },
+                    {
+                        text = _("轻量模式（低内存设备）"),
+                        checked_func = function() return self.settings.low_memory_mode end,
+                        callback = function()
+                            self:toggleSetting("low_memory_mode")
+                            UIManager:show(InfoMessage:new{
+                                text = self.settings.low_memory_mode and
+                                    _("轻量模式已开启：降低分辨率并跳过墨水点，适合低内存设备。") or
+                                    _("轻量模式已关闭。"),
+                                timeout = 3,
+                            })
+                        end,
                     },
                     {
                         text = _("软件更新"),
