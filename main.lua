@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.6.3"
+local PLUGIN_VERSION = "3.6.4"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -926,6 +926,7 @@ function InkStain:readStats()
                 if #weread_stats.books > 0 then
                     result.books = {}
                     local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+                    local seen_titles = {}
                     for i, book in ipairs(weread_stats.books) do
                         if i > top_n then break end
                         local found_progress = matchProgress(miuread_data, book.title)
@@ -940,8 +941,34 @@ function InkStain:readStats()
                             progress = found_progress and found_progress or 0,
                             source = "miuread",
                         })
+                        seen_titles[book.title] = true
                     end
                     result.book_count = #weread_stats.books
+                    -- 微信读书书单不足时，用觅阅进度表补充
+                    if #result.books < top_n and miuread_data.progress_map then
+                        -- 把觅阅进度表按进度排序
+                        local prog_list = {}
+                        for title, prog in pairs(miuread_data.progress_map) do
+                            if not seen_titles[title] and prog > 0 then
+                                table.insert(prog_list, { title = title, progress = prog })
+                            end
+                        end
+                        table.sort(prog_list, function(a, b) return a.progress > b.progress end)
+                        for _, pb in ipairs(prog_list) do
+                            if #result.books >= top_n then break end
+                            table.insert(result.books, {
+                                title = pb.title,
+                                authors = "",
+                                seconds = 0,
+                                read_pages = 0,
+                                pages = 0,
+                                max_page = 0,
+                                last_time = 0,
+                                progress = pb.progress,
+                                source = "miuread",
+                            })
+                        end
+                    end
                 end
                 -- 进度匹配
                 for _, b in ipairs(result.books) do
@@ -2140,11 +2167,11 @@ function InkStain:updateFrequencyMenu()
             text = label,
             radio = true,
             checked_func = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 return tonumber(u.interval) == seconds
             end,
             callback = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 u.interval = seconds
                 self:_saveUpdatePreferences(u)
                 if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
@@ -2168,11 +2195,11 @@ function InkStain:updateRestartMenu()
             text = label,
             radio = true,
             checked_func = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 return (u.restart_mode or "ask") == mode
             end,
             callback = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 u.restart_mode = mode
                 self:_saveUpdatePreferences(u)
                 if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
@@ -2184,7 +2211,7 @@ function InkStain:updateRestartMenu()
 end
 
 function InkStain:updateSettingsMenu()
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     local channel_label = "稳定版"
     -- 安全地读取 OTA 配置（纯 Lua 文件，不加载 C 扩展），用于显示通道名称
     if not self._ota_config_cache then
@@ -2200,12 +2227,12 @@ function InkStain:updateSettingsMenu()
         {
             text = _("自动检查更新"),
             checked_func = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 return u.auto_check ~= false
             end,
             keep_menu_open = true,
             callback = function()
-                local _, u = self:_updatePreferences()
+                local _prefs, u = self:_updatePreferences()
                 u.auto_check = u.auto_check == false
                 self:_saveUpdatePreferences(u)
                 if u.auto_check then
@@ -2223,11 +2250,10 @@ function InkStain:updateSettingsMenu()
             text = _("安装完成后 · ..."),
             sub_item_table_func = function() return self:updateRestartMenu() end,
         },
-        -- 暂时隐藏检查更新入口（OTA 崩溃问题待排查）
-        -- {
-        --     text = _("检查") .. channel_label .. _("更新"),
-        --     callback = function() self:checkForUpdate(false) end,
-        -- },
+        {
+            text = _("检查") .. channel_label .. _("更新"),
+            callback = function() self:checkForUpdate(false) end,
+        },
         {
             text = _("手动下载地址"),
             callback = function()
@@ -2322,7 +2348,7 @@ function InkStain:_showUpdateCompleteDialog(version, allow_restart)
 end
 
 function InkStain:_afterUpdateInstalled(manifest)
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     local version = tostring(manifest and manifest.version or "新版本")
     if update.restart_mode == "never" then
         self:_showUpdateCompleteDialog(version, false)
@@ -2355,7 +2381,7 @@ function InkStain:_presentUpdate(manifest, automatic)
         return
     end
     -- 自动检查：同一版本只提示一次
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     if automatic and tostring(update.last_prompted_version or "") == tostring(manifest.version or "") then
         return
     end
@@ -2554,7 +2580,7 @@ function InkStain:_cancelAutoUpdateCheck(reason)
 end
 
 function InkStain:_scheduleAutoUpdateCheck(delay)
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     if update.auto_check == false then return false end
     if self._auto_update_check_running or self._auto_update_check_task then return false end
 
@@ -2576,7 +2602,7 @@ function InkStain:_scheduleAutoUpdateCheck(delay)
 end
 
 function InkStain:maybeAutoCheckUpdate(force)
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     if not force and update.auto_check == false then return false end
     if self._auto_update_check_running then return false end
 
@@ -2658,7 +2684,7 @@ end
 
 --- 安全版自动检查收尾
 function InkStain:_finishAutoCheckSafe(ok, manifest, interval, OtaConfig)
-    local _, fresh = self:_updatePreferences()
+    local _prefs, fresh = self:_updatePreferences()
     if ok and type(manifest) == "table" then
         fresh.last_success_at = os.time()
         self:_saveUpdatePreferences(fresh)
@@ -2769,7 +2795,7 @@ function InkStain:_doSafeCheckUpdate(OtaConfig, channel_label, repo)
     local rc = os.execute(cmd)
     local success = (rc == true or rc == 0)
 
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     update.last_attempt_at = os.time()
 
     if not success then
@@ -2878,7 +2904,7 @@ function InkStain:_presentUpdateSafe(manifest, OtaConfig, automatic)
     end
 
     -- 自动检查：同一版本只提示一次
-    local _, update = self:_updatePreferences()
+    local _prefs, update = self:_updatePreferences()
     if automatic and tostring(update.last_prompted_version or "") == tostring(manifest.version or "") then
         return
     end
@@ -3330,15 +3356,9 @@ function InkStain:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("手动下载最新版"),
-                        callback = function()
-                            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
-                            local repo_url = "github.com/Estela-Zelin84/inkstain.koplugin/releases"
-                            UIManager:show(InfoMessage:new{
-                                text = _("最新版下载地址：\n\n") .. repo_url .. "\n\n"
-                                    .. _("下载后将 inkstain.koplugin 文件夹复制到 KOReader 插件目录即可。"),
-                                timeout = 0,
-                            })
+                        text = _("软件更新"),
+                        sub_item_table_func = function()
+                            return self:updateSettingsMenu()
                         end,
                     },
                     {
