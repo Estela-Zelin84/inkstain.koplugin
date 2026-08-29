@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.6.0"
+local PLUGIN_VERSION = "3.6.2"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -315,25 +315,14 @@ end
 --- 懒加载 OTA 模块：首次调用时 require pluginota.updater 并执行 startup() 确认
 --  全程 pcall 保护，任何加载失败都不会导致闪退，只会禁用 OTA 功能
 --  使用 socket+ssl 内置库做 HTTPS，避免 os.execute("curl") fork 子进程导致低内存设备 OOM 闪退
+--- 懒加载 OTA 模块：首次调用时 require pluginota.updater 并执行 startup() 确认
+--  全程 pcall 保护，任何加载失败都不会导致闪退，只会禁用 OTA 功能
+--  使用框架内置 curl 下载，不加载 ssl.https 原生库（避免原生库加载导致进程崩溃）
 function InkStain:_ensureUpdater()
     if self._updater_initialized then return self.ota end
     self._updater_initialized = true -- 标记为已尝试，避免反复重试
 
-    -- 第一步：检查 JSON 支持（pluginota 的前置依赖）
-    local has_json = false
-    local ok_json, _ = pcall(require, "json")
-    if ok_json then has_json = true end
-    if not has_json then
-        local ok_rj, _ = pcall(require, "rapidjson")
-        if ok_rj then has_json = true end
-    end
-    if not has_json then
-        logger.warn("[InkStain] OTA unavailable: no JSON support (json/rapidjson)")
-        self._ota_error = _("当前设备不支持 JSON，无法使用更新功能。")
-        return nil
-    end
-
-    -- 第二步：加载 OTA 配置
+    -- 第一步：加载 OTA 配置
     local ok_config, OtaConfig = pcall(require, "ota_config")
     if not ok_config or type(OtaConfig) ~= "table" then
         logger.warn("[InkStain] OTA config load failed:", OtaConfig)
@@ -341,16 +330,7 @@ function InkStain:_ensureUpdater()
         return nil
     end
 
-    -- 第三步：尝试加载 socket + ssl（作为内置 HTTP 客户端，替代 curl）
-    local http_ok, https = pcall(require, "ssl.https")
-    local ltn12_ok, ltn12 = pcall(require, "ltn12")
-    local socket_ok = http_ok and ltn12_ok
-    self._ota_auto_transport_safe = socket_ok == true
-    if not socket_ok then
-        logger.warn("[InkStain] OTA: ssl.https not available, falling back to curl")
-    end
-
-    -- 第四步：加载 pluginota.updater
+    -- 第二步：加载 pluginota.updater（框架内置 json/sha256，使用 curl 下载）
     local ok_updater, Updater = pcall(require, "pluginota.updater")
     if not ok_updater or type(Updater) ~= "table" then
         logger.warn("[InkStain] OTA updater load failed:", Updater)
@@ -358,59 +338,7 @@ function InkStain:_ensureUpdater()
         return nil
     end
 
-    -- 第五步：构造自定义 HTTP 函数（使用 ssl.https，不 fork 子进程）
-    local http_get_func, http_download_func
-    if socket_ok then
-        http_get_func = function(url, opts)
-            opts = opts or {}
-            local connect_timeout = opts.connect_timeout or 5
-            local total_timeout = opts.total_timeout or 20
-            -- 设置超时（ssl.https 通过 socket 超时控制）
-            local prev_timeout
-            if https.TIMEOUT then
-                prev_timeout = https.TIMEOUT
-                https.TIMEOUT = total_timeout
-            end
-            local body, code, headers, status = https.request(url)
-            if prev_timeout ~= nil then
-                https.TIMEOUT = prev_timeout
-            end
-            if type(body) == "string" and body ~= "" and (code == 200 or tonumber(code) == 200) then
-                return body
-            end
-            return nil, tostring(status or code or "http request failed")
-        end
-
-        http_download_func = function(url, path, opts)
-            opts = opts or {}
-            local total_timeout = opts.total_timeout or opts.download_timeout or 240
-            local prev_timeout
-            if https.TIMEOUT then
-                prev_timeout = https.TIMEOUT
-                https.TIMEOUT = total_timeout
-            end
-            local file = io.open(path, "wb")
-            if not file then
-                if prev_timeout ~= nil then https.TIMEOUT = prev_timeout end
-                return nil, "cannot open output file"
-            end
-            local sink = ltn12.sink.file(file)
-            local result, code, headers, status = https.request{
-                url = url,
-                sink = sink,
-            }
-            if prev_timeout ~= nil then
-                https.TIMEOUT = prev_timeout
-            end
-            if result == 1 and (code == 200 or tonumber(code) == 200) then
-                return true
-            end
-            os.remove(path)
-            return nil, tostring(status or code or "download failed")
-        end
-    end
-
-    -- 第六步：构造 Updater 实例
+    -- 第三步：构造 Updater 实例
     local ota, err = Updater:new{
         plugin_root = self.path,
         plugin_dir = OtaConfig.plugin_dir,
@@ -419,11 +347,8 @@ function InkStain:_ensureUpdater()
         channel = OtaConfig.channel,
         channel_tag = OtaConfig.channel_tag,
         github_mirrors = OtaConfig.github_mirrors,
-        http_get = http_get_func,
-        http_download = http_download_func,
-        -- 自动检查只读取很小的 update.json，限制等待时间，避免弱网下长时间卡住主页。
-        connect_timeout = 4,
-        total_timeout = 8,
+        connect_timeout = 5,
+        total_timeout = 15,
         download_timeout = 180,
     }
     if not ota then
@@ -434,7 +359,7 @@ function InkStain:_ensureUpdater()
     self.ota = ota
     self._ota_config = OtaConfig
 
-    -- 第七步：跨重启 pending 状态确认（也做 pcall 保护）
+    -- 第四步：跨重启 pending 状态确认（也做 pcall 保护）
     local ok_startup, update_state = pcall(function() return self.ota:startup() end)
     if not ok_startup then
         logger.warn("[InkStain] OTA startup check failed:", update_state)
@@ -460,6 +385,24 @@ function InkStain:_ensureUpdater()
     return self.ota
 end
 
+--- 获取或创建 Async worker 实例（子进程隔离，防止 OTA 崩溃影响主线程）
+function InkStain:_getOtaAsync()
+    if self._ota_async then return self._ota_async end
+    local ok_async, Async = pcall(require, "async")
+    if not ok_async or type(Async) ~= "table" then
+        logger.warn("[InkStain] async module unavailable:", Async)
+        return nil
+    end
+    local DataStorage = require("datastorage")
+    local temp_dir = DataStorage:getDataDir() .. "/inkstain_ota"
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_lfs and lfs and type(lfs.mkdir) == "function" then
+        pcall(lfs.mkdir, temp_dir)
+    end
+    self._ota_async = Async:new(temp_dir, { poll_interval = 0.3 })
+    return self._ota_async
+end
+
 function InkStain:getRange()
     local days = tonumber(self.settings.days) or DEFAULT_SETTINGS.days
     if days < 1 then days = 1 end
@@ -480,6 +423,116 @@ end
 --   pending.percent > pending_progress.progress > progress_local_percent
 --   > local_position_snapshot.progress(safe) > verified_local_percent
 --   > progress_upload_percent > progress_remote_percent > row.progress
+--- 从 miuread.lua 读取微信读书阅读时长统计（云端同步数据）
+-- 数据来源：觅阅插件的 home_weread_stats_cache（从微信读书 API 拉取后本地缓存）
+-- 返回：{ has_data, total_seconds, daily = { date -> seconds }, books = { title, seconds } }
+function InkStain:readMiureadReadStats()
+    local miuread_path = DataStorage:getSettingsDir() .. "/miuread.lua"
+    local result = {
+        has_data = false,
+        total_seconds = 0,
+        daily = {},          -- { "2026-08-27" -> seconds }
+        books = {},          -- { { title, seconds } }
+        read_days = 0,
+    }
+    if lfs.attributes(miuread_path, "mode") ~= "file" then
+        return result
+    end
+    if not LuaSettings then LuaSettings = require("luasettings") end
+    local ok_open, miuread_db = pcall(LuaSettings.open, LuaSettings, miuread_path)
+    if not ok_open or not miuread_db then
+        return result
+    end
+
+    local cache = miuread_db:readSetting("home_weread_stats_cache", nil)
+    if type(cache) ~= "table" then
+        return result
+    end
+
+    -- 缓存中按周期（weekly/monthly/annually/overall）存储
+    -- 根据当前设置的天数选择最合适的周期
+    local days = tonumber(self.settings.days) or DEFAULT_SETTINGS.days
+    local period_data = nil
+
+    -- 优先选择匹配的周期
+    local weekly = type(cache.weekly) == "table" and cache.weekly or nil
+    local monthly = type(cache.monthly) == "table" and cache.monthly or nil
+    local annually = type(cache.annually) == "table" and cache.annually or nil
+    local overall = type(cache.overall) == "table" and cache.overall or nil
+
+    if days <= 7 and weekly and weekly.daily then
+        period_data = weekly
+    elseif days <= 31 and monthly and monthly.daily then
+        period_data = monthly
+    elseif annually and annually.daily then
+        period_data = annually
+    else
+        period_data = overall
+    end
+
+    if not period_data then
+        return result
+    end
+
+    result.has_data = true
+    result.total_seconds = tonumber(period_data.total_seconds) or 0
+    result.read_days = tonumber(period_data.read_days) or 0
+
+    -- 解析每日数据（readTimes 格式：timestamp -> seconds）
+    local read_times = type(period_data.readTimes) == "table" and period_data.readTimes or {}
+    local daily_arr = type(period_data.daily) == "table" and period_data.daily or {}
+
+    -- 从 daily 数组解析（更直观的格式）
+    local function normalized_timestamp(key)
+        local stamp = tonumber(key)
+        if not stamp then return nil end
+        -- 微信读书的时间戳可能是毫秒
+        if stamp > 10000000000 then stamp = math.floor(stamp / 1000) end
+        return stamp
+    end
+
+    if #daily_arr > 0 then
+        for _, item in ipairs(daily_arr) do
+            if type(item) == "table" then
+                local stamp = normalized_timestamp(item.stamp)
+                local secs = tonumber(item.seconds) or 0
+                if stamp and secs >= 0 then
+                    local date_str = os.date("%Y-%m-%d", stamp)
+                    result.daily[date_str] = (result.daily[date_str] or 0) + secs
+                end
+            end
+        end
+    end
+
+    -- 从 readTimes 解析（补充 daily 没有的数据）
+    for key, value in pairs(read_times) do
+        local stamp = normalized_timestamp(key)
+        local secs = tonumber(value) or 0
+        if stamp and secs >= 0 then
+            local date_str = os.date("%Y-%m-%d", stamp)
+            if not result.daily[date_str] then
+                result.daily[date_str] = secs
+            end
+        end
+    end
+
+    -- 解析书籍排行 readLongest
+    local rank = type(period_data.readLongest) == "table" and period_data.readLongest or {}
+    for _, item in ipairs(rank) do
+        if type(item) == "table" then
+            local book_info = type(item.book) == "table" and item.book
+                or (type(item.albumInfo) == "table" and item.albumInfo or nil)
+            local title = tostring((book_info and book_info.title) or item.title or item.bookTitle or "")
+            local secs = tonumber(item.readTime) or 0
+            if title ~= "" and secs > 0 then
+                table.insert(result.books, { title = title, seconds = secs })
+            end
+        end
+    end
+
+    return result
+end
+
 function InkStain:readMiureadProgress()
     local miuread_path = DataStorage:getSettingsDir() .. "/miuread.lua"
     local result = {
@@ -852,22 +905,80 @@ function InkStain:readStats()
         local miuread_data = self:readMiureadProgress()
         result.has_miuread = miuread_data.has_miuread
 
+        -- 读取微信读书云端阅读时长统计
+        local weread_stats = self:readMiureadReadStats()
+
         local matched = 0
         if source == "miuread" then
-            -- 觅阅数据源：KOReader 统计提供基础数据（书单/时长/页数），觅阅提供进度
+            -- 觅阅数据源：使用微信读书云端统计（时长/书单/每日数据）+ 觅阅进度
             result.data_source_key = "miuread"
-            for _, b in ipairs(result.books) do
-                local found = matchProgress(miuread_data, b.title)
-                if found and found > 0 then
-                    b.progress = found
-                    b.source = "miuread"
-                    matched = matched + 1
+            if weread_stats.has_data then
+                -- 用微信读书云端数据替换总时长和每日数据
+                result.total_seconds = weread_stats.total_seconds
+                result.read_days = weread_stats.read_days or result.read_days
+                -- 替换每日数据
+                if weread_stats.daily and next(weread_stats.daily) then
+                    for _, item in ipairs(result.daily) do
+                        item.seconds = weread_stats.daily[item.date] or 0
+                    end
+                end
+                -- 替换书单用微信读书 readLongest 排行
+                if #weread_stats.books > 0 then
+                    result.books = {}
+                    local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+                    for i, book in ipairs(weread_stats.books) do
+                        if i > top_n then break end
+                        local found_progress = matchProgress(miuread_data, book.title)
+                        table.insert(result.books, {
+                            title = book.title,
+                            authors = "",
+                            seconds = book.seconds,
+                            read_pages = 0,
+                            pages = 0,
+                            max_page = 0,
+                            last_time = 0,
+                            progress = found_progress and found_progress or 0,
+                            source = "miuread",
+                        })
+                    end
+                    result.book_count = #weread_stats.books
+                end
+                -- 进度匹配
+                for _, b in ipairs(result.books) do
+                    local found = matchProgress(miuread_data, b.title)
+                    if found and found > 0 then
+                        b.progress = found
+                        b.source = "miuread"
+                        matched = matched + 1
+                    end
+                end
+            else
+                -- 没有微信读书数据时回退到本地统计 + 觅阅进度
+                for _, b in ipairs(result.books) do
+                    local found = matchProgress(miuread_data, b.title)
+                    if found and found > 0 then
+                        b.progress = found
+                        b.source = "miuread"
+                        matched = matched + 1
+                    end
                 end
             end
         elseif source == "both" then
-            -- 两者合并：优先使用觅阅进度（progress_local_percent），更准确
-            -- 觅阅进度不可用时，回退到 max_page/pages 计算
+            -- 混合模式：时长取本地和云端的较大值（微信读书云端可能包含其他设备）
+            -- 进度优先用觅阅的，书单以本地为主
             result.data_source_key = "both"
+            if weread_stats.has_data and weread_stats.total_seconds > result.total_seconds then
+                result.total_seconds = weread_stats.total_seconds
+                -- 每日数据也合并：取较大值
+                if weread_stats.daily and next(weread_stats.daily) then
+                    for _, item in ipairs(result.daily) do
+                        local wr_secs = weread_stats.daily[item.date] or 0
+                        if wr_secs > item.seconds then
+                            item.seconds = wr_secs
+                        end
+                    end
+                end
+            end
             for _, b in ipairs(result.books) do
                 local found = matchProgress(miuread_data, b.title)
                 if found and found > 0 then
@@ -876,7 +987,8 @@ function InkStain:readStats()
                 end
             end
         end
-        logger.info("墨痕壁纸：觅阅进度匹配", matched, "/", #result.books, "本")
+        logger.info("墨痕壁纸：觅阅进度匹配", matched, "/", #result.books, "本",
+            weread_stats.has_data and ("（微信读书时长" .. tostring(math.floor(weread_stats.total_seconds / 60)) .. "分钟）") or "")
     else
         result.data_source_key = "koreader"
     end
@@ -1989,7 +2101,7 @@ local OTA_MIN_INTERVAL = 21600 -- 最短 6 小时（防止过于频繁）
 function InkStain:_updatePreferences()
     self.settings = self.settings or {}
     local defaults = {
-        auto_check = true,
+        auto_check = false,
         interval = OTA_DEFAULT_INTERVAL,
         last_attempt_at = 0,
         last_success_at = 0,
@@ -2111,10 +2223,11 @@ function InkStain:updateSettingsMenu()
             text = _("安装完成后 · ..."),
             sub_item_table_func = function() return self:updateRestartMenu() end,
         },
-        {
-            text = _("检查") .. channel_label .. _("更新"),
-            callback = function() self:checkForUpdate(false) end,
-        },
+        -- 暂时隐藏检查更新入口（OTA 崩溃问题待排查）
+        -- {
+        --     text = _("检查") .. channel_label .. _("更新"),
+        --     callback = function() self:checkForUpdate(false) end,
+        -- },
         {
             text = _("手动下载地址"),
             callback = function()
@@ -2294,49 +2407,140 @@ function InkStain:_downloadAndUpdate(manifest)
         text = _("正在后台下载并校验安装包……"),
         timeout = 0,
     })
-    UIManager:scheduleIn(0.5, function()
-        -- pcall 保护：防止 download() 内部抛出异常导致闪退/重启
-        local ok_dl, package_path, download_err = pcall(function() return self.ota:download(manifest) end)
-        if not ok_dl then
-            logger.warn("[InkStain] OTA download crashed:", package_path)
-            UIManager:show(InfoMessage:new{
-                text = _("更新下载失败：\n") .. tostring(package_path or "未知错误"),
-                timeout = 5,
-            })
-            return
-        end
-        if not package_path then
-            UIManager:show(InfoMessage:new{
-                text = _("更新下载失败：\n") .. tostring(download_err or "下载失败"),
-                timeout = 5,
-            })
-            return
-        end
-        UIManager:show(InfoMessage:new{
-            text = _("安装包校验完成，正在安装……"),
-            timeout = 1,
-        })
+
+    -- 使用 Async 子进程执行 download + install：完全隔离，防止崩溃影响主进程
+    local async = self:_getOtaAsync()
+    if not async then
+        -- 子进程不可用时回退到主线程 pcall
+        logger.warn("[InkStain] OTA async unavailable for download, falling back to main thread")
         UIManager:scheduleIn(0.5, function()
-            -- pcall 保护：防止 install() 内部抛出异常导致闪退/重启
-            local ok_inst, install_ok, install_err = pcall(function() return self.ota:install(package_path, manifest) end)
-            if not ok_inst then
-                logger.warn("[InkStain] OTA install crashed:", install_ok)
-                UIManager:show(InfoMessage:new{
-                    text = _("更新失败：\n") .. tostring(install_ok or "未知错误"),
-                    timeout = 0,
-                })
-                return
-            end
-            if install_ok then
-                self:_afterUpdateInstalled(manifest)
-            else
-                UIManager:show(InfoMessage:new{
-                    text = _("更新失败：\n") .. tostring(install_err),
-                    timeout = 0,
-                })
-            end
+            self:_doDownloadAndInstallInMainThread(manifest)
         end)
+        return
+    end
+
+    local plugin_path = self.path
+    local ok_started = async:run("ota_download_install", function()
+        -- 子进程内执行下载和安装
+        local Updater = require("pluginota.updater")
+        local OtaConfig = require("ota_config")
+        local ota, err = Updater:new{
+            plugin_root = plugin_path,
+            plugin_dir = OtaConfig.plugin_dir,
+            plugin_id = OtaConfig.plugin_id,
+            repo = OtaConfig.repo,
+            channel = OtaConfig.channel,
+            channel_tag = OtaConfig.channel_tag,
+            github_mirrors = OtaConfig.github_mirrors,
+            connect_timeout = 5,
+            total_timeout = 20,
+            download_timeout = 180,
+        }
+        if not ota then
+            return { success = false, phase = "init", error = err }
+        end
+        local package_path, dl_err = ota:download(manifest)
+        if not package_path then
+            return { success = false, phase = "download", error = dl_err }
+        end
+        local installed, inst_err = ota:install(package_path, manifest)
+        if installed then
+            return { success = true, phase = "install" }
+        end
+        return { success = false, phase = "install", error = inst_err }
+    end, function(result)
+        self:_handleDownloadInstallResult(result, manifest)
+    end, 240) -- 下载+安装给 240 秒超时
+
+    if not ok_started then
+        -- 启动子进程失败，回退到主线程
+        logger.warn("[InkStain] OTA async download start failed, falling back")
+        UIManager:scheduleIn(0.5, function()
+            self:_doDownloadAndInstallInMainThread(manifest)
+        end)
+    end
+end
+
+--- 主线程回退版下载安装（子进程不可用时使用）
+function InkStain:_doDownloadAndInstallInMainThread(manifest)
+    local ok_dl, package_path, download_err = pcall(function() return self.ota:download(manifest) end)
+    if not ok_dl then
+        logger.warn("[InkStain] OTA download crashed:", package_path)
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = _("更新下载失败：\n") .. tostring(package_path or "未知错误"),
+            timeout = 5,
+        })
+        return
+    end
+    if not package_path then
+        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+        UIManager:show(InfoMessage:new{
+            text = _("更新下载失败：\n") .. tostring(download_err or "下载失败"),
+            timeout = 5,
+        })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = _("安装包校验完成，正在安装……"),
+        timeout = 1,
+    })
+    UIManager:scheduleIn(0.5, function()
+        local ok_inst, install_ok, install_err = pcall(function() return self.ota:install(package_path, manifest) end)
+        if not ok_inst then
+            logger.warn("[InkStain] OTA install crashed:", install_ok)
+            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+            UIManager:show(InfoMessage:new{
+                text = _("更新失败：\n") .. tostring(install_ok or "未知错误"),
+                timeout = 0,
+            })
+            return
+        end
+        if install_ok then
+            self:_afterUpdateInstalled(manifest)
+        else
+            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+            UIManager:show(InfoMessage:new{
+                text = _("更新失败：\n") .. tostring(install_err),
+                timeout = 0,
+            })
+        end
     end)
+end
+
+--- 统一处理下载安装结果（兼容子进程和主线程）
+function InkStain:_handleDownloadInstallResult(result, manifest)
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+
+    if result.ok and result.value and type(result.value) == "table" and result.value.success then
+        self:_afterUpdateInstalled(manifest)
+        return
+    end
+
+    local err_msg = "未知错误"
+    local phase = ""
+    if result.value and type(result.value) == "table" then
+        if result.value.error then err_msg = tostring(result.value.error) end
+        if result.value.phase then phase = tostring(result.value.phase) end
+    elseif result.error then
+        err_msg = tostring(result.error)
+    end
+
+    logger.warn("[InkStain] OTA download/install failed:", phase, err_msg)
+
+    local phase_text = ""
+    if phase == "download" then
+        phase_text = _("更新下载失败：\n")
+    elseif phase == "install" then
+        phase_text = _("更新失败：\n")
+    else
+        phase_text = _("更新失败：\n")
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = phase_text .. err_msg,
+        timeout = 0,
+    })
 end
 
 function InkStain:_cancelAutoUpdateCheck(reason)
@@ -2384,35 +2588,87 @@ function InkStain:maybeAutoCheckUpdate(force)
     if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
     if NetworkMgr and not NetworkMgr:isConnected() then return false end
 
-    -- 3.5.7 仍沿用 3.5.5 的 ssl.https 网络层，不 fork curl/worker，避免
-    -- 低内存 Kindle/Kobo 因额外进程造成 OOM。区别是只在主页延迟执行。
-    self:_ensureUpdater()
-    if not self.ota then return false end
-    if self._ota_auto_transport_safe == false then
-        logger.warn("[InkStain] OTA auto-check skipped: ssl.https unavailable")
-        return false
-    end
+    -- 只加载 ota_config（纯 Lua，安全），不加载 pluginota
+    local ok_cfg, OtaConfig = pcall(require, "ota_config")
+    if not ok_cfg or type(OtaConfig) ~= "table" then return false end
 
     self._auto_update_check_running = true
     update.last_attempt_at = now
     self:_saveUpdatePreferences(update)
 
-    local ok, manifest, err = pcall(function() return self.ota:check() end)
-    self._auto_update_check_running = false
+    -- 自动检查也用安全的 curl 方式（不加载 OTA 重模块）
+    UIManager:scheduleIn(0.1, function()
+        local ok, manifest = self:_doSafeAutoCheck(OtaConfig)
+        self._auto_update_check_running = false
+        self:_finishAutoCheckSafe(ok, manifest, interval, OtaConfig)
+    end)
+
+    return true
+end
+
+--- 安全自动检查内部实现（纯 curl + 字符串匹配）
+function InkStain:_doSafeAutoCheck(OtaConfig)
+    local channel_tag = OtaConfig.channel_tag or (OtaConfig.channel == "beta" and "beta-channel" or "stable-channel")
+    local manifest_url = "https://github.com/" .. OtaConfig.repo .. "/releases/download/" .. channel_tag .. "/update.json"
+
+    local DataStorage = require("datastorage")
+    local temp_dir = DataStorage:getDataDir() .. "/inkstain_ota"
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_lfs and lfs and type(lfs.mkdir) == "function" then
+        pcall(lfs.mkdir, temp_dir)
+    end
+    local temp_file = temp_dir .. "/auto_check_" .. tostring(os.time()) .. ".json"
+
+    local cmd = "curl -L --fail --silent --connect-timeout 4 --max-time 12 -o "
+        .. "'" .. temp_file .. "' '" .. manifest_url .. "' 2>/dev/null"
+
+    local rc = os.execute(cmd)
+    if rc ~= true and rc ~= 0 then
+        os.remove(temp_file)
+        return false, nil
+    end
+
+    local f = io.open(temp_file, "r")
+    local raw = f and f:read("*a") or ""
+    if f then f:close() end
+    os.remove(temp_file)
+
+    if raw == "" then return false, nil end
+
+    local version = raw:match('"version"%s*:%s*"([^"]+)"')
+    if not version then return false, nil end
+
+    if not self:_versionIsNewer(version, PLUGIN_VERSION) then
+        return true, nil -- 成功但无新版本
+    end
+
+    -- 有新版本，构造 manifest
+    local manifest = {
+        version = version,
+        package_url = raw:match('"package_url"%s*:%s*"([^"]+)"'),
+        sha256 = raw:match('"sha256"%s*:%s*"([^"]+)"'),
+        size = tonumber(raw:match('"size"%s*:%s*(%d+)')),
+        notes = raw:match('"notes"%s*:%s*"([^"]+)"') or "",
+        summary = raw:match('"summary"%s*:%s*"([^"]+)"') or "",
+        name = raw:match('"name"%s*:%s*"([^"]+)"') or "",
+        channel = OtaConfig.channel,
+    }
+    return true, manifest
+end
+
+--- 安全版自动检查收尾
+function InkStain:_finishAutoCheckSafe(ok, manifest, interval, OtaConfig)
     local _, fresh = self:_updatePreferences()
     if ok and type(manifest) == "table" then
         fresh.last_success_at = os.time()
         self:_saveUpdatePreferences(fresh)
-        self:_presentUpdate(manifest, true)
+        self:_presentUpdateSafe(manifest, OtaConfig, true)
         return true
     end
-
     if not ok then
-        logger.warn("[InkStain] OTA auto-check crashed:", tostring(manifest))
-    else
-        logger.warn("[InkStain] OTA auto-check failed:", tostring(err or "unknown error"))
+        logger.warn("[InkStain] OTA auto-check failed")
     end
-    -- 失败后最早 6 小时再尝试，避免断网/线路异常时频繁请求。
+    -- 失败后最早 6 小时再尝试
     fresh.last_attempt_at = os.time() - math.max(0, interval - OTA_MIN_INTERVAL)
     self:_saveUpdatePreferences(fresh)
     return false
@@ -2422,15 +2678,7 @@ function InkStain:checkForUpdate(automatic)
     -- 最外层 pcall 兜底：任何 Lua 级别的错误都不会导致闪退
     local ok, result = pcall(function()
         if automatic then return self:maybeAutoCheckUpdate(true) end
-        self:_ensureUpdater()
-        if not self.ota then
-            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
-            UIManager:show(InfoMessage:new{
-                text = self._ota_error or _("更新功能不可用"),
-                timeout = 5,
-            })
-            return false
-        end
+        -- 手动检查：不调用 _ensureUpdater()，直接走安全路径
         if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
         if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
         if NetworkMgr and not NetworkMgr:isConnected() then
@@ -2463,49 +2711,283 @@ function InkStain:checkForUpdate(automatic)
 end
 
 function InkStain:_manualCheckUpdate()
-    self:_ensureUpdater()
-    if not self.ota then
-        if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+    -- 注意：这里不调用 _ensureUpdater()，避免在主线程加载 pluginota 重模块
+    -- 只用 ota_config（纯 Lua 表）+ curl 检查，绝对安全
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+
+    -- 只加载 ota_config（纯 Lua 配置，无 C 扩展，安全）
+    local ok_cfg, OtaConfig = pcall(require, "ota_config")
+    if not ok_cfg or type(OtaConfig) ~= "table" then
         UIManager:show(InfoMessage:new{
-            text = self._ota_error or _("更新功能不可用"),
+            text = _("更新配置加载失败。"),
             timeout = 5,
         })
         return
     end
-    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
-    local channel_label = "稳定版"
-    if self._ota_config and self._ota_config.channel == "beta" then
-        channel_label = "测试版"
+
+    local channel_label = OtaConfig.channel == "beta" and "测试版" or "稳定版"
+    local channel_tag = OtaConfig.channel_tag or (OtaConfig.channel == "beta" and "beta-channel" or "stable-channel")
+    local repo = OtaConfig.repo or ""
+    if repo == "" then
+        UIManager:show(InfoMessage:new{ text = _("更新配置无效"), timeout = 3 })
+        return
     end
+
     UIManager:show(InfoMessage:new{
         text = _("正在后台检查") .. channel_label .. _("版本……"),
         timeout = 2,
     })
-    UIManager:scheduleIn(0.5, function()
-        -- pcall 保护：防止 check() 内部抛出异常导致设备闪退/重启
-        local ok, manifest, err = pcall(function() return self.ota:check() end)
-        local _, update = self:_updatePreferences()
-        update.last_attempt_at = os.time()
-        if ok and type(manifest) == "table" then update.last_success_at = os.time() end
-        self:_saveUpdatePreferences(update)
-        if not ok then
-            -- pcall 捕获到异常
-            logger.warn("[InkStain] OTA check crashed:", manifest)
-            UIManager:show(InfoMessage:new{
-                text = _("检查更新失败：\n") .. tostring(manifest or "未知错误"),
-                timeout = 5,
-            })
-            return
-        end
-        if type(manifest) ~= "table" then
-            UIManager:show(InfoMessage:new{
-                text = _("检查更新失败：\n") .. tostring(err),
-                timeout = 5,
-            })
-            return
-        end
-        self:_presentUpdate(manifest, false)
+
+    -- 用 UIManager:scheduleIn 延迟执行，让提示先显示出来
+    UIManager:scheduleIn(0.3, function()
+        self:_doSafeCheckUpdate(OtaConfig, channel_label, channel_tag, repo)
     end)
+end
+
+--- 安全检查更新：只用 curl + 字符串匹配，不加载任何 OTA 重模块
+--- 这是防止崩溃的核心：主线程只跑纯 Lua + 外部 curl 命令
+function InkStain:_doSafeCheckUpdate(OtaConfig, channel_label, repo)
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+
+    local channel_tag = OtaConfig.channel_tag or (OtaConfig.channel == "beta" and "beta-channel" or "stable-channel")
+    local manifest_url = "https://github.com/" .. OtaConfig.repo .. "/releases/download/" .. channel_tag .. "/update.json"
+
+    -- 使用临时文件保存结果
+    local DataStorage = require("datastorage")
+    local temp_dir = DataStorage:getDataDir() .. "/inkstain_ota"
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_lfs and lfs and type(lfs.mkdir) == "function" then
+        pcall(lfs.mkdir, temp_dir)
+    end
+    local temp_file = temp_dir .. "/update_check_" .. tostring(os.time()) .. ".json"
+
+    -- curl 命令（和 pluginota 框架用的一样，但通过 os.execute 外部调用）
+    local cmd = "curl -L --fail --silent --show-error --connect-timeout 5 --max-time 20 -o "
+        .. "'" .. temp_file .. "' '" .. manifest_url .. "' 2>/dev/null"
+
+    -- os.execute 的返回值：0 表示成功
+    local rc = os.execute(cmd)
+    local success = (rc == true or rc == 0)
+
+    local _, update = self:_updatePreferences()
+    update.last_attempt_at = os.time()
+
+    if not success then
+        os.remove(temp_file)
+        self:_saveUpdatePreferences(update)
+        UIManager:show(InfoMessage:new{
+            text = _("检查更新失败：\n无法连接到更新服务器"),
+            timeout = 5,
+        })
+        return
+    end
+
+    -- 读取文件内容
+    local f = io.open(temp_file, "r")
+    local raw = f and f:read("*a") or ""
+    if f then f:close() end
+    os.remove(temp_file)
+
+    if raw == "" then
+        self:_saveUpdatePreferences(update)
+        UIManager:show(InfoMessage:new{
+            text = _("检查更新失败：\n服务器返回空数据"),
+            timeout = 5,
+        })
+        return
+    end
+
+    -- 用简单字符串匹配提取 version 和 sha256（不用 json 库，避免加载 C 扩展）
+    local version = raw:match('"version"%s*:%s*"([^"]+)"')
+    local package_url = raw:match('"package_url"%s*:%s*"([^"]+)"')
+    local sha256 = raw:match('"sha256"%s*:%s*"([^"]+)"')
+    local size = raw:match('"size"%s*:%s*(%d+)')
+    local notes = raw:match('"notes"%s*:%s*"([^"]+)"')
+    local summary = raw:match('"summary"%s*:%s*"([^"]+)"')
+    local name = raw:match('"name"%s*:%s*"([^"]+)"')
+
+    if not version then
+        self:_saveUpdatePreferences(update)
+        UIManager:show(InfoMessage:new{
+            text = _("检查更新失败：\n无法解析更新信息"),
+            timeout = 5,
+        })
+        return
+    end
+
+    update.last_success_at = os.time()
+    self:_saveUpdatePreferences(update)
+
+    -- 比较版本
+    local current = PLUGIN_VERSION
+    local is_newer = self:_versionIsNewer(version, current)
+
+    if not is_newer then
+        UIManager:show(InfoMessage:new{
+            text = _("当前已是最新版本\n\n当前版本：") .. tostring(current),
+            timeout = 3,
+        })
+        return
+    end
+
+    -- 有新版本，构造 manifest 表并显示更新确认
+    local manifest = {
+        version = version,
+        package_url = package_url,
+        sha256 = sha256,
+        size = tonumber(size),
+        notes = notes or "",
+        summary = summary or "",
+        name = name or "",
+        channel = OtaConfig.channel,
+    }
+
+    self:_presentUpdateSafe(manifest, OtaConfig, false)
+end
+
+--- 简单语义化版本比较（纯 Lua，不依赖任何外部模块）
+function InkStain:_versionIsNewer(new_ver, old_ver)
+    local function parse(v)
+        local major, minor, patch = tostring(v or ""):match("^v?(%d+)%.(%d+)%.(%d+)")
+        if not major then return nil end
+        return tonumber(major), tonumber(minor), tonumber(patch)
+    end
+    local n1, n2, n3 = parse(new_ver)
+    local o1, o2, o3 = parse(old_ver)
+    if not n1 or not o1 then
+        return tostring(new_ver) ~= tostring(old_ver)
+    end
+    if n1 ~= o1 then return n1 > o1 end
+    if n2 ~= o2 then return n2 > o2 end
+    return n3 > o3
+end
+
+--- 安全版更新确认（不加载 OTA 模块，只显示信息）
+function InkStain:_presentUpdateSafe(manifest, OtaConfig, automatic)
+    if not ConfirmBox then ConfirmBox = require("ui/widget/confirmbox") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+
+    if manifest.current then
+        if not automatic then
+            UIManager:show(InfoMessage:new{
+                text = _("当前已是最新版本\n\n当前版本：") .. tostring(PLUGIN_VERSION),
+                timeout = 3,
+            })
+        end
+        return
+    end
+
+    -- 自动检查：同一版本只提示一次
+    local _, update = self:_updatePreferences()
+    if automatic and tostring(update.last_prompted_version or "") == tostring(manifest.version or "") then
+        return
+    end
+    update.last_prompted_version = tostring(manifest.version or "")
+    self:_saveUpdatePreferences(update)
+
+    local channel_label = OtaConfig.channel == "beta" and "测试版" or "稳定版"
+    local text = _("发现") .. channel_label .. _("版本 ") .. tostring(manifest.version)
+    local notes = tostring(manifest.summary or "")
+    if notes == "" then notes = tostring(manifest.notes or "") end
+    -- 处理转义的换行符
+    notes = notes:gsub("\\n", "\n")
+    if notes ~= "" then text = text .. "\n\n更新内容\n" .. notes end
+    text = text .. "\n\n是否下载并安装"
+
+    UIManager:show(ConfirmBox:new{
+        text = text,
+        ok_text = _("下载并安装"),
+        ok_callback = function()
+            if not NetworkMgr then NetworkMgr = require("ui/network/manager") end
+            if NetworkMgr and not NetworkMgr:isConnected() then
+                if NetworkMgr.willRereadConnect then
+                    NetworkMgr:willRereadConnect(function()
+                        self:_downloadAndUpdateSafe(manifest, OtaConfig)
+                    end)
+                else
+                    UIManager:show(InfoMessage:new{ text = _("当前网络不可用"), timeout = 3 })
+                end
+                return
+            end
+            self:_downloadAndUpdateSafe(manifest, OtaConfig)
+        end,
+    })
+end
+
+--- 安全版下载更新：在 Async 子进程中加载完整 OTA 模块并执行下载安装
+function InkStain:_downloadAndUpdateSafe(manifest, OtaConfig)
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+    UIManager:show(InfoMessage:new{
+        text = _("正在后台下载并校验安装包……"),
+        timeout = 0,
+    })
+
+    -- 使用 Async 子进程：完整 OTA 模块只在子进程中加载
+    local async = self:_getOtaAsync()
+    if not async then
+        -- 子进程不可用时，尝试在主线程用 pcall 加载（风险较高但至少能用）
+        logger.warn("[InkStain] OTA async unavailable, trying main thread pcall")
+        UIManager:scheduleIn(0.5, function()
+            self:_ensureUpdater()
+            if self.ota then
+                self:_doDownloadAndInstallInMainThread(manifest)
+            else
+                UIManager:show(InfoMessage:new{
+                    text = self._ota_error or _("更新功能不可用"),
+                    timeout = 5,
+                })
+            end
+        end)
+        return
+    end
+
+    local plugin_path = self.path
+    local ok_started = async:run("ota_download_install", function()
+        -- 子进程内加载 OTA 模块（完全隔离，崩溃不影响主进程）
+        local Updater = require("pluginota.updater")
+        local ota, err = Updater:new{
+            plugin_root = plugin_path,
+            plugin_dir = OtaConfig.plugin_dir,
+            plugin_id = OtaConfig.plugin_id,
+            repo = OtaConfig.repo,
+            channel = OtaConfig.channel,
+            channel_tag = OtaConfig.channel_tag,
+            github_mirrors = OtaConfig.github_mirrors,
+            connect_timeout = 5,
+            total_timeout = 20,
+            download_timeout = 180,
+        }
+        if not ota then
+            return { success = false, phase = "init", error = err }
+        end
+        local package_path, dl_err = ota:download(manifest)
+        if not package_path then
+            return { success = false, phase = "download", error = dl_err }
+        end
+        local installed, inst_err = ota:install(package_path, manifest)
+        if installed then
+            return { success = true, phase = "install" }
+        end
+        return { success = false, phase = "install", error = inst_err }
+    end, function(result)
+        self:_handleDownloadInstallResult(result, manifest)
+    end, 240)
+
+    if not ok_started then
+        -- 启动子进程失败，回退到主线程 pcall
+        logger.warn("[InkStain] OTA async download start failed, falling back")
+        UIManager:scheduleIn(0.5, function()
+            self:_ensureUpdater()
+            if self.ota then
+                self:_doDownloadAndInstallInMainThread(manifest)
+            else
+                UIManager:show(InfoMessage:new{
+                    text = self._ota_error or _("更新功能不可用"),
+                    timeout = 5,
+                })
+            end
+        end)
+    end
 end
 
 function InkStain:addToMainMenu(menu_items)
