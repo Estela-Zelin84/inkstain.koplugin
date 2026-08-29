@@ -3330,9 +3330,15 @@ function InkStain:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = _("软件更新"),
-                        sub_item_table_func = function()
-                            return self:updateSettingsMenu()
+                        text = _("手动下载最新版"),
+                        callback = function()
+                            if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+                            local repo_url = "github.com/Estela-Zelin84/inkstain.koplugin/releases"
+                            UIManager:show(InfoMessage:new{
+                                text = _("最新版下载地址：\n\n") .. repo_url .. "\n\n"
+                                    .. _("下载后将 inkstain.koplugin 文件夹复制到 KOReader 插件目录即可。"),
+                                timeout = 0,
+                            })
                         end,
                     },
                     {
