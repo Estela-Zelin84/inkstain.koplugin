@@ -33,7 +33,7 @@ local NetworkMgr
 local LuaSettings
 local util
 
-local PLUGIN_VERSION = "3.7.0"
+local PLUGIN_VERSION = "3.8.1"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
