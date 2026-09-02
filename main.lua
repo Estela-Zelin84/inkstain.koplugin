@@ -9,6 +9,7 @@ local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local Device = require("device")
 local FontList = require("fontlist")
+local Geom = require("ui/geometry")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiutil = require("ffi/util")
@@ -32,8 +33,10 @@ local Event
 local NetworkMgr
 local LuaSettings
 local util
+local ImageWidget
+local StatsScreen
 
-local PLUGIN_VERSION = "3.8.1"
+local PLUGIN_VERSION = "3.8.2"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -58,6 +61,7 @@ local DEFAULT_SETTINGS = {
     bg_image_path = "",  -- 自定义背景图片路径
     low_memory_mode = false,  -- 轻量模式：降低分辨率、跳过重计算（低内存设备推荐）
     chart_mode = "line",  -- "line" 折线图 / "heatmap" 热力图（最近半年）
+    brand_text = "墨痕",  -- 锁屏壁纸与统计界面的品牌字样（可自定义，如书斋名）
 }
 
 --- 热力图显示的周数（最近 N 周，26 周 = 半年，格子大小与铺满宽度的最佳平衡）
@@ -248,6 +252,9 @@ function InkStain:init()
         self.ui.menu:registerToMainMenu(self)
     end
     _G.InkStainWallpaper = self
+
+    -- 注册导航栏入口（simpleui QA / zenos Dispatcher）
+    self:_registerNavigationEntries()
 
     -- OTA：延迟到首次菜单访问时初始化，避免启动时加载 updater.lua（含 SHA-256 等重模块）
     self._updater_initialized = false
@@ -816,8 +823,27 @@ local function matchProgress(progress_data, title)
     return nil
 end
 
-function InkStain:readStats()
-    local start_ts, end_ts, days = self:getRange()
+function InkStain:readStats(range, force_heatmap, book_limit)
+    -- 书单上限：统计界面可传更大的 book_limit；壁纸/默认沿用设置 top_n（封顶5）
+    local book_cap = book_limit and math.max(1, math.floor(book_limit))
+        or math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+
+    local start_ts, end_ts, days
+    if range == "week" then
+        days = 7
+    elseif range == "month" then
+        days = 30
+    elseif range == "year" then
+        days = 365
+    else
+        -- 未指定 range：沿用原 getRange()（尊重 settings.days），保持壁纸行为不变
+        start_ts, end_ts, days = self:getRange()
+    end
+    if range then
+        local today = dayStart()
+        start_ts = today - (days - 1) * 86400
+        end_ts = today + 86400
+    end
     local result = {
         start_ts = start_ts,
         end_ts = end_ts,
@@ -888,7 +914,7 @@ function InkStain:readStats()
         result.book_count = tonumber(book_count) or 0
 
         local min_seconds = math.max(0, tonumber(self.settings.min_minutes) or 0) * 60
-        local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+        local top_n = book_cap
         local books_sql = string.format([[
             SELECT b.title,
                    ifnull(b.authors, ''),
@@ -1000,7 +1026,7 @@ function InkStain:readStats()
                 -- 替换书单用微信读书 readLongest 排行
                 if #weread_stats.books > 0 then
                     result.books = {}
-                    local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+                    local top_n = book_cap
                     local seen_titles = {}
                     for i, book in ipairs(weread_stats.books) do
                         if i > top_n then break end
@@ -1095,7 +1121,7 @@ function InkStain:readStats()
         -- 统一兜底：任何分支书单仍为空且觅阅进度表有数据时，从进度表补充
         if #result.books == 0 and miuread_data and miuread_data.progress_map then
             logger.info("墨痕壁纸：书单仍为空，从觅阅进度表兜底补充")
-            local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+            local top_n = book_cap
             local prog_list = {}
             for title, prog in pairs(miuread_data.progress_map) do
                 if prog > 0 then
@@ -1125,16 +1151,18 @@ function InkStain:readStats()
         result.data_source_key = "koreader"
     end
 
-    local top_n = math.max(1, math.min(5, tonumber(self.settings.top_n) or DEFAULT_SETTINGS.top_n))
+    local top_n = book_cap
     while #result.books > top_n do
         table.remove(result.books)
     end
 
-    -- 生成热力图数据（最近 HEATMAP_WEEKS 周，用于热力图模式，与当前周期无关）
-    if self.settings.chart_mode == "heatmap" and result.has_db then
+    -- 生成热力图数据：区间与当前统计窗口（周/月/年）对齐，起始日对齐到周一
+    if (self.settings.chart_mode == "heatmap" or force_heatmap) and result.has_db then
         local heat_end = dayStart(result.end_ts - 1) + 86400  -- 包含结束当天
         -- 起始日对齐到周一，保证第一列是完整的一周
+        -- 壁纸（range=nil）沿用 HEATMAP_WEEKS（26 周）；统计界面（显式 range）跟随所选窗口
         local raw_start = heat_end - HEATMAP_WEEKS * 7 * 86400
+        if range then raw_start = result.start_ts end
         local raw_wday = os.date("*t", raw_start).wday  -- 1=周日, 2=周一 ...
         local heat_start = raw_start - ((raw_wday + 5) % 7) * 86400  -- 回退到周一
         local heat_days = math.floor((heat_end - heat_start) / 86400 + 0.5)
@@ -1255,11 +1283,16 @@ end
 
 local function drawImage(bb, path, x, y, size)
     if not RenderImage then RenderImage = require("ui/renderimage") end
+    if not ImageWidget then ImageWidget = require("ui/widget/imagewidget") end
     local ok, image = pcall(RenderImage.renderImageFile, RenderImage, path, false, size, size)
     if ok and image then
-        local ok_blit = pcall(bb.blitFrom, bb, image, math.floor(x), math.floor(y), 0, 0, image:getWidth(), image:getHeight())
+        -- 用 ImageWidget 绘制：透明像素会按 alpha 与底图（白底）混合，
+        -- 避免直接 blitFrom 在墨水屏上把透明区域填成黑色。
+        local widget = ImageWidget:new{ image = image, alpha = true }
+        widget:paintTo(bb, math.floor(x), math.floor(y))
+        if widget.free then widget:free() end
         if image.free then image:free() end
-        return ok_blit
+        return true
     end
     return false
 end
@@ -1599,30 +1632,55 @@ end
 -- 自定义标题渲染
 -- 中文模式：墨 + 痕（同字号）+ ink stain（英文在痕下方左对齐）
 -- 英文模式：Ink Stain 大字 + ink stain 小字副标题
-local function drawCustomTitle(bb, x_right, y, scale, lang, T)
+local function drawCustomTitle(bb, x_right, y, scale, lang, T, brand_text)
     if not TextWidget then TextWidget = require("ui/widget/textwidget") end
+    -- brand_text：可自定义的品牌字样（默认“墨痕”）。非默认值时用整体渲染，去掉固定的 ink stain 副标
+    local custom = brand_text and brand_text ~= "" and brand_text ~= "墨痕"
     if lang == "en" then
-        -- 英文标题：Ink Stain
+        -- 英文标题：Ink Stain（或自定义字样）
         local main_size = math.max(28, math.min(40, math.floor(38 * scale)))
         local sub_size = math.max(10, math.floor(main_size * 0.32))
-        local main_text = T("title_cn1") .. " " .. T("title_cn2")
-        local main_w = TextWidget:new{ text = main_text, face = getFontFace(main_size), bold = true }
+        local en_title
+        if custom then
+            en_title = brand_text
+        else
+            en_title = T("title_cn1") .. " " .. T("title_cn2")
+        end
+        local main_w = TextWidget:new{ text = en_title, face = getFontFace(main_size), bold = true }
         main_w:updateSize()
-        local sub_w = TextWidget:new{ text = T("title_en"), face = getFontFace(sub_size), bold = false }
-        sub_w:updateSize()
-        local gap = math.max(2, math.floor(3 * scale))
-        local total_w = math.max(main_w:getSize().w, sub_w:getSize().w)
+        local total_w = main_w:getSize().w
+        local total_h = main_w:getSize().h
+        local sub_w
+        if not custom then
+            sub_w = TextWidget:new{ text = T("title_en"), face = getFontFace(sub_size), bold = false }
+            sub_w:updateSize()
+            total_w = math.max(total_w, sub_w:getSize().w)
+            total_h = total_h + math.max(1, math.floor(2 * scale)) + sub_w:getSize().h
+        end
         local start_x = math.floor(x_right - total_w)
         main_w:paintTo(bb, start_x, y)
-        local sub_y = y + main_w:getSize().h + math.max(1, math.floor(2 * scale))
-        sub_w:paintTo(bb, start_x, sub_y)
-        local total_h = main_w:getSize().h + math.max(1, math.floor(2 * scale)) + sub_w:getSize().h
+        if sub_w then
+            local sub_y = y + main_w:getSize().h + math.max(1, math.floor(2 * scale))
+            sub_w:paintTo(bb, start_x, sub_y)
+        end
         if main_w.free then main_w:free() end
-        if sub_w.free then sub_w:free() end
+        if sub_w and sub_w.free then sub_w:free() end
         return { w = total_w, h = total_h }
     end
 
-    -- 中文标题：墨 + 痕 + ink stain
+    -- 中文标题：默认“墨 + 痕 + ink stain”；自定义字样则整体渲染
+    if custom then
+        local cn_size = math.max(32, math.min(48, math.floor(42 * scale)))
+        local main_w = TextWidget:new{ text = brand_text, face = getFontFace(cn_size), bold = true }
+        main_w:updateSize()
+        local total_w = main_w:getSize().w
+        local start_x = math.floor(x_right - total_w)
+        main_w:paintTo(bb, start_x, y)
+        if main_w.free then main_w:free() end
+        return { w = total_w, h = main_w:getSize().h }
+    end
+
+    -- 默认样式：墨 + 痕 + ink stain
     local cn_size = math.max(32, math.min(48, math.floor(42 * scale)))
     local en_size = math.max(10, math.floor(cn_size * 0.32))
 
@@ -1747,12 +1805,14 @@ function InkStain:buildPng(stats)
 
     local y = margin_y
     local s
-    local ok_title, title_result = pcall(drawCustomTitle, bb, w - margin_x, y, scale, lang, T)
+    local wallpaper_brand = self.settings.brand_text
+    if not wallpaper_brand or wallpaper_brand == "" then wallpaper_brand = "墨痕" end
+    local ok_title, title_result = pcall(drawCustomTitle, bb, w - margin_x, y, scale, lang, T, wallpaper_brand)
     if ok_title and title_result then
         s = title_result
     else
         logger.warn("墨痕壁纸：自定义标题渲染失败，回退到普通标题", title_result)
-        local fallback_title = (lang == "en") and "Ink Stain" or (self.settings.title or "墨痕")
+        local fallback_title = (lang == "en") and "Ink Stain" or (self.settings.brand_text or self.settings.title or "墨痕")
         s = drawText(bb, fallback_title, w - margin_x, y, title_size, true, nil, "right")
     end
     drawText(bb, T("serial") .. os.date("%m%d", stats.end_ts - 1), margin_x, y + math.floor(s.h * 0.25), large, true)
@@ -2812,7 +2872,7 @@ end
 function InkStain:updateFrequencyMenu()
     local values = { { 86400, "每天" }, { 3 * 86400, "每 3 天" }, { 7 * 86400, "每 7 天" } }
     local rows = {}
-    for _, entry in ipairs(values) do
+    for _idx, entry in ipairs(values) do
         local seconds, label = entry[1], entry[2]
         rows[#rows + 1] = {
             text = label,
@@ -3667,6 +3727,15 @@ function InkStain:_downloadAndUpdateSafe(manifest, OtaConfig)
     end
 end
 
+function InkStain:showBetaDialog()
+    -- 普通提示框：显示 QQ 群号，点一下关闭
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+    UIManager:show(InfoMessage:new{
+        text = _("加入内测 QQ群：627525507"),
+        timeout = 10,
+    })
+end
+
 function InkStain:addToMainMenu(menu_items)
     -- 菜单构建时预加载 InfoMessage（回调中大量使用）
     if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
@@ -3675,6 +3744,12 @@ function InkStain:addToMainMenu(menu_items)
         sorting_hint = "tools",
         sub_item_table = {
             -- ===== 操作区 =====
+            {
+                text = _("查看墨痕统计"),
+                callback = function()
+                    self:showStatsScreen()
+                end,
+            },
             {
                 text = _("生成并设为休眠壁纸"),
                 callback = function()
@@ -3900,6 +3975,52 @@ function InkStain:addToMainMenu(menu_items)
                         },
                     },
                     {
+                        text = _("统计界面署名"),
+                        keep_menu_open = true,
+                        callback = function()
+                            local ok_id, InputDialog = pcall(require, "ui/widget/inputdialog")
+                            if not (ok_id and InputDialog) then
+                                UIManager:show(InfoMessage:new{ text = _("当前固件不支持文本输入。"), timeout = 3 })
+                                return
+                            end
+                            local current = self.settings.brand_text
+                            if not current or current == "" then current = "墨痕" end
+                            local dialog
+                            dialog = InputDialog:new{
+                                title = _("品牌署名（墨痕）"),
+                                input = current,
+                                input_hint = _("同时用于锁屏壁纸与统计界面的品牌字样，如：墨痕 / 书斋"),
+                                input_type = "string",
+                                fullscreen = false,
+                                buttons = {
+                                    {
+                                        {
+                                            text = _("取消"),
+                                            callback = function()
+                                                UIManager:close(dialog)
+                                            end,
+                                        },
+                                        {
+                                            text = _("确定"),
+                                            callback = function()
+                                                local val = (dialog:getInputText() or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                                                if val == "" then val = "墨痕" end
+                                                self.settings.brand_text = val
+                                                self:saveSettings()
+                                                UIManager:close(dialog)
+                                                UIManager:show(InfoMessage:new{
+                                                    text = _("署名已设为「" .. val .. "」，锁屏壁纸与统计界面立即生效；\n导航栏文字需重启 KOReader 后更新。"),
+                                                    timeout = 4,
+                                                })
+                                            end,
+                                        },
+                                    },
+                                },
+                            }
+                            UIManager:show(dialog)
+                        end,
+                    },
+                    {
                         text = _("壁纸字体"),
                         sub_item_table = {
                             {
@@ -4046,6 +4167,13 @@ function InkStain:addToMainMenu(menu_items)
                     },
                 },
             },
+            -- ===== 加入内测 =====
+            {
+                text = _("加入内测"),
+                callback = function()
+                    self:showBetaDialog()
+                end,
+            },
             -- ===== 关于 =====
             {
                 text = T(_("关于（v%1）"), PLUGIN_VERSION),
@@ -4058,6 +4186,267 @@ function InkStain:addToMainMenu(menu_items)
             },
         },
     }
+end
+
+-- ===== 导航栏入口注册 =====
+-- 1. simpleui：QA.register 注册一个快捷动作，用户可在 simpleui 底部栏设置中
+--    把"墨痕统计"加为 tab。
+-- 2. KOReader Dispatcher：注册一个全局 action（"墨痕统计"），用户可在
+--    「设置 → 手势」里把任意手势（轻扫/长按/双击等）绑到它，从而用手势
+--    调出统计面板。该 action 不依赖 zenos / simpleui，二者都会自动识别。
+-- 均用 pcall 保护：对应模块缺失时静默跳过，不影响墨痕本体。
+function InkStain:_registerNavigationEntries()
+    local brand = self.settings.brand_text
+    if not brand or brand == "" then brand = "墨痕" end
+    local entry_label = brand .. "统计"
+
+    -- simpleui 快捷动作注册
+    pcall(function()
+        local ok_qa, QA = pcall(require, "features/sui_quickactions")
+        if ok_qa and QA and type(QA.register) == "function" then
+            -- 导航栏图标：使用去边距的墨痕 Logo（在 simpleui 图标框里占得更满，视觉上更大）
+            local icon = (self.path or "") .. "/resources/inkstain_logo_nav.png"
+            pcall(function()
+                if lfs.attributes(icon, "mode") ~= "file" then
+                    local ok_cfg, Config = pcall(require, "infra/sui_config")
+                    if ok_cfg and Config and Config.ICON and Config.ICON.stats then
+                        icon = Config.ICON.stats
+                    end
+                end
+            end)
+            QA.register{
+                id = "inkstain_stats",
+                label = entry_label,
+                icon = icon,
+                show_confirm = false,
+                execute = function()
+                    local inst = rawget(_G, "InkStainWallpaper")
+                    if inst and type(inst.showStatsScreen) == "function" then
+                        inst:showStatsScreen()
+                    end
+                end,
+            }
+            logger.info("[InkStain] simpleui 导航栏入口已注册")
+        end
+    end)
+
+    -- KOReader 全局 Dispatcher 动作注册：供「设置 → 手势」及 ZenOS 导航栏「添加操作」绑定。
+    -- 关键点：
+    --   * general = true —— 与 ZenOS 自带动作结构一致（ZenOS 补丁过的 Dispatcher 选择器按
+    --     general/reader 分区，缺此标志的动作在列表/添加流程中会被错误处理导致 KOReader 闪退）。
+    --   * callback 直接调出统计面板 —— 自包含，不依赖外部事件处理器，执行最可靠。
+    pcall(function()
+        local ok_disp, Dispatcher = pcall(require, "dispatcher")
+        if ok_disp and Dispatcher and type(Dispatcher.registerAction) == "function" then
+            Dispatcher.registerAction("inkstain_stats", {
+                title = entry_label,
+                category = "none",
+                general = true,
+                callback = function()
+                    local inst = rawget(_G, "InkStainWallpaper")
+                    if inst and type(inst.showStatsScreen) == "function" then
+                        inst:showStatsScreen()
+                    end
+                end,
+            })
+            logger.info("[InkStain] Dispatcher 入口已注册（手势/导航栏可调出统计面板）")
+        end
+    end)
+end
+
+-- ===== 墨痕阅读统计全屏界面 =====
+-- 全新统计面板（非壁纸图）。复用 readStats() 数据与本地绘制工具。
+-- 入口：simpleui QA / zenos Dispatcher / 本插件菜单（菜单项见 addToMainMenu）。
+
+-- 在给定 Blitbuffer 上绘制"墨痕阅读统计"面板（全屏）。
+-- 会在 self.stats_close_rect 写入右上角关闭键的屏幕坐标矩形，供 StatsScreen 注册触摸区。
+function InkStain:renderStatsScreen(bb)
+    -- 墨痕统计面板：照搬墨痕锁屏（壁纸）样式
+    -- 布局：头部信息 -> 书单（置顶，最多 9 本）-> 墨痕图标（底部）
+    -- 删掉图表（热力图/折线）、锁屏底部的二维码、条形码、Design、格言；顶部"墨痕"图标沉到底部
+    local w, h = Screen:getWidth(), Screen:getHeight()
+    if w < 300 or h < 300 then w, h = 824, 1200 end
+    bb:fill(Blitbuffer.COLOR_WHITE)
+
+    local range = self.stats_range or "year"
+    local stats = self:readStats(range, false, 12)
+    local lang = self.settings.wallpaper_lang or "zh"
+
+    if not i18n then
+        local ok_i18n, mod = pcall(dofile, self.path .. "/i18n.lua")
+        if ok_i18n and type(mod) == "table" then i18n = mod end
+    end
+    local T
+    if i18n and i18n.loadLang then T = i18n.loadLang(self.path, lang) end
+    if not T then T = function() return "" end end
+    local function L(key, fallback)
+        local s = T(key)
+        if s and s ~= "" then return s end
+        return fallback
+    end
+
+    local scale = math.min(w / 600, h / 800)
+    local margin_x = math.max(20, math.floor(w * 0.05))
+    local margin_y = math.max(18, math.floor(h * 0.035))
+    local title_size = math.max(32, math.min(48, math.floor(42 * scale)))
+    local normal = math.max(11, math.min(15, math.floor(13 * scale)))
+    local small = math.max(9, math.min(12, math.floor(10 * scale)))
+    local tiny = math.max(8, math.min(10, math.floor(8 * scale)))
+    local line_w = 1
+    local content_w = w - margin_x * 2
+
+    -- 右上角关闭键（小 X 图标），触摸区记录在 self.stats_close_rect
+    local function drawCloseIcon(bb, cx, cy, r, color)
+        local lw = math.max(2, math.floor(r * 0.25))
+        local d = r * 0.72
+        drawLine(bb, cx - d, cy - d, cx + d, cy + d, lw, color)
+        drawLine(bb, cx + d, cy - d, cx - d, cy + d, lw, color)
+    end
+    local close_r = math.max(12, math.floor(w * 0.022))
+    local close_cx = w - margin_x - close_r
+    local close_cy = margin_y + close_r
+    drawCloseIcon(bb, close_cx, close_cy, close_r, Blitbuffer.COLOR_BLACK)
+    local pad = math.max(6, math.floor(close_r * 0.55))
+    self.stats_close_rect = {
+        x = close_cx - close_r - pad,
+        y = close_cy - close_r - pad,
+        w = (close_r + pad) * 2,
+        h = (close_r + pad) * 2,
+    }
+
+    local y = margin_y
+    local s
+
+    -- 头部信息（照搬壁纸，删掉单号 serial）
+    s = drawText(bb, L("period", "时间") .. os.date("%Y.%m.%d", stats.start_ts) .. " - " .. os.date("%Y.%m.%d", stats.end_ts - 1), margin_x, y, small, false, content_w)
+    y = y + s.h + math.max(2, math.floor(2 * scale))
+    local source_key = stats.data_source_key or "koreader"
+    local source_label
+    if source_key == "miuread" then source_label = L("source_miuread", "微信读书")
+    elseif source_key == "both" then source_label = L("source_both", "混合")
+    else source_label = L("source_koreader", "KOReader") end
+    s = drawText(bb, L("device_source", "数据源") .. source_label, margin_x, y, small, false, content_w)
+    y = y + s.h + math.max(4, math.floor(4 * scale))
+    local show_n = math.min(#stats.books, 9)
+    drawText(bb, L("duration", "总时长") .. formatDuration(stats.total_seconds, T), margin_x, y, normal, true, content_w * 0.55)
+    s = drawText(bb, L("top_books_stats", "阅读时长前 ") .. tostring(show_n) .. "本", w - margin_x, y, normal, true, nil, "right")
+    y = y + s.h + math.max(8, math.floor(8 * scale))
+    drawLine(bb, margin_x, y, w - margin_x, y, line_w)
+
+    -- 书单表头（置顶，最多 9 本，沿用壁纸表头与行样式）
+    local table_header_y = y + math.max(8, math.floor(8 * scale))
+    local x_no = margin_x
+    local x_title = margin_x + math.floor(76 * scale)
+    local x_qty = w - margin_x - math.floor(68 * scale)
+    local x_unit = w - margin_x - math.floor(18 * scale)
+    local title_w = math.max(120, x_qty - x_title - 20 * scale)
+    drawText(bb, L("col_category", "品类"), x_title, table_header_y, small, false)
+    drawText(bb, L("col_qty", "数量"), x_qty, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_unit", "单位"), x_unit, table_header_y, small, false, nil, "center")
+    y = table_header_y + math.max(22, math.floor(22 * scale))
+    drawLine(bb, margin_x, y, w - margin_x, y, line_w)
+
+    -- 底部墨痕 Logo + 字样（替代被删的二维码/条形码），据此反推书单可用高度
+    local icon_h = math.floor(78 * scale)
+    local list_end_max = h - margin_y - icon_h - math.max(30, math.floor(30 * scale))
+    if list_end_max < y + 60 then list_end_max = y + 60 end
+    local min_row_h = math.max(48, math.floor(52 * scale))
+    local rows_top = y + math.max(8, math.floor(8 * scale))
+    local max_rows_by_height = math.max(1, math.floor((list_end_max - rows_top) / min_row_h))
+    local visible_rows = math.min(#stats.books, 9, max_rows_by_height)
+    local row_h = min_row_h
+
+    y = rows_top
+    if #stats.books == 0 then
+        local msg
+        if stats.error then
+            msg = L("err_read", "读取失败：") .. truncate(stats.error, 28)
+        elseif not stats.has_db then
+            msg = L("err_no_db", "未找到阅读统计数据库")
+        else
+            msg = L("err_empty", "该周期内暂无阅读记录")
+        end
+        drawBoxText(bb, msg, margin_x, y + 8 * scale, content_w, normal, true)
+    else
+        for i = 1, visible_rows do
+            local book = stats.books[i]
+            local no = string.format("NO.%02d", i)
+            local progress_mode = self.settings.progress_mode or "total"
+            local progress = "—"
+            if progress_mode == "period" then
+                if book.pages and book.pages > 0 and book.read_pages and book.read_pages > 0 then
+                    progress = string.format("%d%%", math.min(100, math.floor(book.read_pages * 100 / book.pages + 0.5)))
+                end
+            else
+                if book.progress then
+                    progress = string.format("%d%%", math.min(100, math.floor(book.progress + 0.5)))
+                elseif book.pages and book.pages > 0 and book.max_page and book.max_page > 0 then
+                    progress = string.format("%d%%", math.min(100, math.floor(book.max_page * 100 / book.pages + 0.5)))
+                end
+            end
+            drawText(bb, no, x_no, y, normal, true)
+            s = drawText(bb, truncate(book.title, 16), x_title, y, normal, true, title_w)
+            local meta_y = y + math.max(s.h, 18)
+            drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
+            drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
+            drawText(bb, "1", x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, L("unit_book", "本"), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            y = y + row_h
+        end
+        if #stats.books > visible_rows then
+            drawText(bb, L("omitted_prefix", "还有 ") .. tostring(#stats.books - visible_rows) .. L("omitted", " 本未显示"), x_title, math.min(y, list_end_max - 18 * scale), tiny, false, title_w)
+        end
+    end
+    drawLine(bb, margin_x, list_end_max, w - margin_x, list_end_max, line_w)
+
+    -- 墨痕 Logo + 字样（Logo 在前、文字在后，整体水平居中，Logo 放大）
+    local logo_path = self.path .. "/resources/inkstain_logo.png"
+    local logo_size = icon_h
+    local brand_text = self.settings.brand_text
+    if not brand_text or brand_text == "" then brand_text = "墨痕" end
+    local brand_size = math.max(28, math.min(40, math.floor(36 * scale)))
+    local TextWidget = require("ui/widget/textwidget")
+    local tw = TextWidget:new{
+        text = brand_text,
+        face = getFontFace(brand_size),
+        bold = true,
+        fgcolor = Blitbuffer.COLOR_BLACK,
+    }
+    tw:updateSize()
+    local text_size = tw:getSize()
+    local gap = math.max(10, math.floor(10 * scale))
+    local total_w = logo_size + gap + text_size.w
+    local start_x = math.floor((w - total_w) / 2)
+    local logo_y = list_end_max + math.max(8, math.floor(8 * scale))
+    pcall(drawImage, bb, logo_path, start_x, logo_y, logo_size)
+    local text_y = logo_y + math.floor((logo_size - text_size.h) / 2)
+    tw:paintTo(bb, start_x + logo_size + gap, text_y)
+    if tw.free then tw:free() end
+
+    return bb
+end
+function InkStain:showStatsScreen()
+    if not StatsScreen then StatsScreen = require("stats_screen") end
+    -- 统计窗口默认“年”
+    if not self.stats_range then self.stats_range = "year" end
+    -- 全屏：直接用屏幕原生宽高，不做横竖交换，保证绘制坐标与触摸坐标（ges.pos）一致
+    local w, h = Screen:getWidth(), Screen:getHeight()
+    if w < 300 or h < 300 then w, h = 824, 1200 end
+    local bb = Blitbuffer.new(w, h, Screen.bb:getType())
+    self:renderStatsScreen(bb)
+    local widget = StatsScreen:new{
+        dimen = Geom:new{ x = 0, y = 0, w = w, h = h },
+        plugin = self,
+        bb = bb,
+        close_rect = self.stats_close_rect,
+    }
+    UIManager:show(widget)
+end
+
+-- zenos Dispatcher 事件回调
+function InkStain:onInkStainStats()
+    self:showStatsScreen()
+    return true
 end
 
 return InkStain
