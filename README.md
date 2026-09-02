@@ -55,7 +55,8 @@
 
 ## 📸 效果预览
 
-<img width="369.2" height="514" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/85a21e15-c006-4c96-9b39-af5fd6536c3a" />
+<img width="369.2" height="514" alt="0484432950f42d6c567a13832850aa64" src="https://github.com/user-attachments/assets/85a21e15-c006-4c96-9b39-af5fd6536c3a" /><img width="369.2" height="514" alt="布丁扫描2026年09月01日11时02分04秒" src="https://github.com/user-attachments/assets/9157a0ab-1a13-4ce4-97c4-a624aed71fe7" />
+
 
 壁纸采用收据 / 墨痕账单风格，主要包含四个区域：
 
