@@ -32,6 +32,9 @@ msgstr "Total: "
 msgid "top_books"
 msgstr "List: Top "
 
+msgid "top_books_stats"
+msgstr "Top "
+
 # Table headers
 msgid "col_category"
 msgstr "Title"
@@ -57,7 +60,7 @@ msgstr "ea"
 
 # Omission notice
 msgid "omitted"
-msgstr " more omitted (screen height)"
+msgstr " more not shown"
 
 msgid "omitted_prefix"
 msgstr ""
