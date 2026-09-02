@@ -32,6 +32,9 @@ msgstr "时长："
 msgid "top_books"
 msgstr "书单：Top "
 
+msgid "top_books_stats"
+msgstr "阅读时长前 "
+
 # 表头
 msgid "col_category"
 msgstr "品类"
@@ -57,10 +60,10 @@ msgstr "本"
 
 # 省略提示
 msgid "omitted"
-msgstr " 本因屏幕高度省略"
+msgstr " 本未显示"
 
 msgid "omitted_prefix"
-msgstr "另有 "
+msgstr "还有 "
 
 # 图表标签
 msgid "daily_avg"
