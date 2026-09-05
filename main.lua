@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.8.2"
+local PLUGIN_VERSION = "3.9.0"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -62,6 +62,8 @@ local DEFAULT_SETTINGS = {
     low_memory_mode = false,  -- 轻量模式：降低分辨率、跳过重计算（低内存设备推荐）
     chart_mode = "line",  -- "line" 折线图 / "heatmap" 热力图（最近半年）
     brand_text = "墨痕",  -- 锁屏壁纸与统计界面的品牌字样（可自定义，如书斋名）
+    wallpaper_save_path = "",            -- 自定义壁纸保存目录（空=不额外保存；安卓上可设为共享目录如 Pictures，便于手动设为系统壁纸）
+    wallpaper_save_only_custom = false,  -- true 时 KOReader 原生屏保也改用自定义路径文件（否则额外存一份，原生屏保保留）
 }
 
 --- 热力图显示的周数（最近 N 周，26 周 = 半年，格子大小与铺满宽度的最佳平衡）
@@ -227,9 +229,13 @@ function InkStain:init()
     self.db_location = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
     -- 字体复制：仅在目标文件不存在时执行（首次安装）
     -- 分块复制（每块 64KB），避免一次性读取 24MB 字体文件导致低内存设备 OOM
+    -- 3.8.2 优化：存在性检查保持同步（仅两次 stat，极轻），实际复制延迟到首帧执行，
+    -- 避免首次安装时 24MB 字体复制阻塞 KOReader 启动。字体就位前若需渲染，
+    -- buildPng 会回退到内置字体，不影响功能。
     local font_src = (self.path or "") .. "/assets/" .. PLUGIN_FONT_NAME
     local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
     if lfs.attributes(font_src, "mode") == "file" and not lfs.attributes(font_dest, "mode") then
+        UIManager:nextTick(function()
         local CHUNK_SIZE = 64 * 1024  -- 64KB
         local src_f = io.open(font_src, "rb")
         if src_f then
@@ -247,6 +253,7 @@ function InkStain:init()
             end
             src_f:close()
         end
+        end)
     end
     if self.ui and self.ui.menu then
         self.ui.menu:registerToMainMenu(self)
@@ -254,7 +261,11 @@ function InkStain:init()
     _G.InkStainWallpaper = self
 
     -- 注册导航栏入口（simpleui QA / zenos Dispatcher）
-    self:_registerNavigationEntries()
+    -- 3.8.2 优化：延迟到首帧执行，缩短 init 同步耗时，加速 KOReader 启动。
+    -- 首帧前用户无法交互，延后注册不影响可用性。
+    UIManager:nextTick(function()
+        self:_registerNavigationEntries()
+    end)
 
     -- OTA：延迟到首次菜单访问时初始化，避免启动时加载 updater.lua（含 SHA-256 等重模块）
     self._updater_initialized = false
@@ -262,6 +273,10 @@ function InkStain:init()
     self._auto_update_check_task = nil
     -- 从设置中恢复上次刷新时间戳，避免重启后首次休眠强制生成
     self.last_refresh_ts = tonumber(self.settings.last_refresh_ts) or 0
+    -- 省电相关状态（见 _schedulePeriodicRefresh / generate）
+    self._wallpaper_dirty = true          -- 首次启动强制至少生成一次，确保壁纸存在
+    self._wallpaper_generated_once = false
+    self._last_db_mtime = nil             -- 尚未记录数据库修改时间指纹
     -- 周期刷新定时器：唤醒时按 refresh_interval 静默刷新壁纸
     -- 替代原休眠前生成模式，彻底解决休眠/唤醒卡顿
     self._periodic_timer_running = false
@@ -273,6 +288,9 @@ function InkStain:init()
 end
 
 function InkStain:saveSettings()
+    -- 任意设置变更都可能影响到壁纸内容，标记下次周期刷新需要重新生成
+    -- （周期刷新会据此跳过“数据未变”的无谓重绘，见 _schedulePeriodicRefresh）
+    self._wallpaper_dirty = true
     G_reader_settings:saveSetting(self.settings_key, self.settings)
     if G_reader_settings.flush then
         G_reader_settings:flush()
@@ -301,6 +319,18 @@ function InkStain:_schedulePeriodicRefresh()
         if not self:shouldApplyInCurrentContext() then
             self:_schedulePeriodicRefresh()
             return
+        end
+        -- 省电：数据未变则跳过本次重绘。判断依据：
+        --   1) 无设置变更（_wallpaper_dirty）；2) 已生成过至少一次；3) 阅读数据库修改时间未变。
+        -- 空闲（无新阅读）时整次“读库+全屏渲染+写PNG”都省掉，近乎零耗电。
+        -- 注：微信读书/觅阅云端数据源不经过本地数据库，此处按“无变更”处理，
+        -- 由设置变更（dirty）或关闭文档时触发刷新，避免周期性访问云端耗电。
+        if not self._wallpaper_dirty and self._wallpaper_generated_once then
+            local cur_mtime = (lfs.attributes(self.db_location, "modification")) or -1
+            if cur_mtime == (self._last_db_mtime or -1) then
+                self:_schedulePeriodicRefresh()
+                return
+            end
         end
         local now = os.time()
         if now - (self.last_refresh_ts or 0) < interval then
@@ -1281,20 +1311,28 @@ local function drawText(bb, text, x, y, size, bold, max_width, align, color)
     return widget_size
 end
 
+-- 静态 Logo 解码缓存：路径+尺寸相同的图只解码一次，后续渲染直接复用 Blitbuffer，
+-- 避免每次生成壁纸/统计面板都重新解码 PNG（省 CPU、减少临时内存分配）。
+-- 注意：缓存的 image 由本模块持有，绝不 free；ImageWidget 仅负责把它贴到目标 bb。
+local _logo_image_cache = {}
+
 local function drawImage(bb, path, x, y, size)
     if not RenderImage then RenderImage = require("ui/renderimage") end
     if not ImageWidget then ImageWidget = require("ui/widget/imagewidget") end
-    local ok, image = pcall(RenderImage.renderImageFile, RenderImage, path, false, size, size)
-    if ok and image then
-        -- 用 ImageWidget 绘制：透明像素会按 alpha 与底图（白底）混合，
-        -- 避免直接 blitFrom 在墨水屏上把透明区域填成黑色。
-        local widget = ImageWidget:new{ image = image, alpha = true }
-        widget:paintTo(bb, math.floor(x), math.floor(y))
-        if widget.free then widget:free() end
-        if image.free then image:free() end
-        return true
+    local key = path .. "@" .. tostring(size)
+    local image = _logo_image_cache[key]
+    if not image then
+        local ok, img = pcall(RenderImage.renderImageFile, RenderImage, path, false, size, size)
+        if not (ok and img) then return false end
+        image = img
+        _logo_image_cache[key] = img
     end
-    return false
+    -- 用 ImageWidget 绘制：透明像素会按 alpha 与底图（白底）混合，
+    -- 避免直接 blitFrom 在墨水屏上把透明区域填成黑色。
+    local widget = ImageWidget:new{ image = image, alpha = true }
+    widget:paintTo(bb, math.floor(x), math.floor(y))
+    if widget.free then widget:free() end
+    return true
 end
 
 local function drawBoxText(bb, text, x, y, width, size, bold, align)
@@ -2038,6 +2076,13 @@ function InkStain:buildPng(stats)
     return bb
 end
 
+--- 自定义壁纸保存路径（可选）：返回自定义目录下的壁纸文件名，未设置则返回 nil
+function InkStain:customOutputFile()
+    local p = self.settings.wallpaper_save_path
+    if not p or p == "" then return nil end
+    return p:gsub("/$", "") .. "/inkstain_wallpaper.png"
+end
+
 function InkStain:writeWallpaper(stats)
     if not ensureDir(self.output_dir) then
         return nil, _("无法创建壁纸输出目录。")
@@ -2053,18 +2098,39 @@ function InkStain:writeWallpaper(stats)
         local ok_call, ret = pcall(bb.writePNG, bb, self.output_file)
         ok = ok_call and ret
     end
-    if bb.free then bb:free() end
     if not ok then
+        if bb.free then bb:free() end
         return nil, _("写入 PNG 壁纸失败。")
     end
+    -- 额外写入自定义保存路径（可选）：便于在安卓等平台手动设为系统锁屏/桌面壁纸。
+    -- 仅覆盖同名文件，不清理用户目录，避免误删其原有文件。
+    local custom = self:customOutputFile()
+    if custom then
+        local cdir = custom:match("^(.+)/[^/]+$")
+        if cdir and ensureDir(cdir) then
+            local ok_custom = pcall(function()
+                if bb.writeToFile then
+                    bb:writeToFile(custom, "png", nil, true)
+                elseif bb.writePNG then
+                    bb:writePNG(custom)
+                end
+            end)
+            if not ok_custom then
+                logger.warn("[InkStain] 自定义路径写入失败（已忽略）：", custom)
+            end
+        end
+    end
+    if bb.free then bb:free() end
     return self.output_file
 end
 
 function InkStain:isUsingInkStainScreensaver()
+    local custom = self:customOutputFile()
     local screensaver_type = G_reader_settings:readSetting("screensaver_type")
     local screensaver_dir = G_reader_settings:readSetting("screensaver_dir") or ""
     local screensaver_document_cover = G_reader_settings:readSetting("screensaver_document_cover") or ""
     return screensaver_document_cover == self.output_file
+        or (custom and screensaver_document_cover == custom)
         or screensaver_dir == self.output_dir
         or screensaver_dir:find("/inkstain", 1, true) ~= nil
         or (screensaver_type == "document_cover" and screensaver_document_cover:find("/inkstain", 1, true) ~= nil)
@@ -2093,11 +2159,17 @@ function InkStain:backupScreensaverSettings()
 end
 
 function InkStain:applyScreensaverSettings()
+    -- “仅自定义路径”模式下，KOReader 原生屏保也指向自定义保存文件
+    local target = self.output_file
+    local custom = self:customOutputFile()
+    if self.settings.wallpaper_save_only_custom and custom then
+        target = custom
+    end
     if not self:isUsingInkStainScreensaver() then
         self:backupScreensaverSettings()
     end
     G_reader_settings:saveSetting("screensaver_type", "document_cover")
-    G_reader_settings:saveSetting("screensaver_document_cover", self.output_file)
+    G_reader_settings:saveSetting("screensaver_document_cover", target)
     G_reader_settings:makeTrue("screensaver_stretch_images")
     G_reader_settings:makeFalse("screensaver_show_message")
     G_reader_settings:saveSetting("screensaver_img_background", "white")
@@ -2179,9 +2251,17 @@ function InkStain:generate(quiet)
         self:applyScreensaverSettings()
     end
     self.last_refresh_ts = os.time()
+    self._wallpaper_generated_once = true
+    -- 记录阅读数据库修改时间作为“数据指纹”：周期刷新据此判断是否有新阅读记录，
+    -- 数据未变时跳过整次重绘（省电）。无数据库时记为 -1（哨兵）。
+    self._last_db_mtime = (lfs.attributes(self.db_location, "modification")) or -1
+    -- 已生成，清除“设置变更需刷新”标记
+    self._wallpaper_dirty = false
     -- 持久化到设置，重启后仍能识别上次刷新时间，避免重启后首次休眠强制生成
+    -- 注意：此处用直接持久化而非 saveSettings()，避免把本次生成误标脏、导致周期刷新反复重绘
     self.settings.last_refresh_ts = self.last_refresh_ts
-    self:saveSettings()
+    G_reader_settings:saveSetting(self.settings_key, self.settings)
+    if G_reader_settings.flush then G_reader_settings:flush() end
 
     if not quiet then
         UIManager:show(InfoMessage:new{
@@ -2640,6 +2720,37 @@ function InkStain:setCustomBgImage()
                 self:saveSettings()
                 UIManager:show(InfoMessage:new{ text = _("背景图片已设置。"), timeout = 3 })
             end
+        end,
+    }
+    UIManager:show(path_chooser)
+end
+
+--- 设置自定义壁纸保存目录（目录选择器）
+-- 用户在安卓等平台上把壁纸存到共享目录（如 Pictures），即可手动设为系统锁屏/桌面壁纸。
+function InkStain:setCustomWallpaperPath()
+    if not PathChooser then PathChooser = require("ui/widget/pathchooser") end
+    if not InfoMessage then InfoMessage = require("ui/widget/infomessage") end
+    local current_dir = "/"
+    if self.settings.wallpaper_save_path and self.settings.wallpaper_save_path ~= "" then
+        current_dir = self.settings.wallpaper_save_path:gsub("/$", "")
+    end
+    local path_chooser = PathChooser:new{
+        title = _("选择壁纸保存目录"),
+        select_file = false,
+        select_directory = true,
+        show_files = false,
+        detailed_file_info = false,
+        path = current_dir,
+        onConfirm = function(path)
+            if not path or path == "" then return end
+            self.settings.wallpaper_save_path = path:gsub("/$", "")
+            self:saveSettings()
+            self:generate(true)
+            UIManager:show(InfoMessage:new{
+                text = _("壁纸保存目录已设为：\n") .. self.settings.wallpaper_save_path
+                    .. "\n\n" .. _("已重新生成壁纸到该目录（文件名 inkstain_wallpaper.png）。可在系统相册/设置中手动设为壁纸。"),
+                timeout = 6,
+            })
         end,
     }
     UIManager:show(path_chooser)
@@ -4157,11 +4268,40 @@ function InkStain:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("自定义壁纸保存路径"),
+                        callback = function()
+                            self:setCustomWallpaperPath()
+                        end,
+                    },
+                    {
+                        text = _("仅使用自定义路径（关闭原生屏保）"),
+                        checked_func = function()
+                            return self.settings.wallpaper_save_only_custom and self:customOutputFile() ~= nil
+                        end,
+                        callback = function()
+                            self.settings.wallpaper_save_only_custom = not self.settings.wallpaper_save_only_custom
+                            self:saveSettings()
+                            if self.settings.wallpaper_save_only_custom and self:customOutputFile() then
+                                self:generate(true)
+                                UIManager:show(InfoMessage:new{ text = _("已切换为仅自定义路径，并重新生成壁纸。"), timeout = 3 })
+                            else
+                                UIManager:show(InfoMessage:new{ text = _("已恢复：额外保存一份，原生屏保保留。"), timeout = 3 })
+                            end
+                        end,
+                    },
+                    {
                         text = _("显示输出路径"),
                         callback = function()
+                            local msg = _("KOReader 屏保路径：\n") .. self.output_file
+                            local custom = self:customOutputFile()
+                            if custom then
+                                msg = msg .. "\n\n" .. _("自定义保存路径：\n") .. custom
+                            else
+                                msg = msg .. "\n\n" .. _("自定义保存路径：未设置")
+                            end
                             UIManager:show(InfoMessage:new{
-                                text = self.output_file,
-                                timeout = 6,
+                                text = msg,
+                                timeout = 8,
                             })
                         end,
                     },
