@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.0beta1"
+local PLUGIN_VERSION = "3.9.1"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -853,6 +853,45 @@ local function matchProgress(progress_data, title)
     return nil
 end
 
+-- 标注/笔记统计：KOReader 把每本书的“标注（高亮）”与“笔记”存在该书 docsettings 的
+-- "highlight" 设置里（statistics 库不记录此项）。这里按书名在 ReadHistory 中定位文件路径后统计。
+-- 标注数 = 高亮条目总数；笔记数 = 带非空 note 的高亮条目数。结果按书名缓存，避免每次刷新重读。
+local _anno_note_cache = {}
+local function getBookAnnoNote(title)
+    if _anno_note_cache[title] then
+        return _anno_note_cache[title].anno, _anno_note_cache[title].note
+    end
+    local anno, note = 0, 0
+    local ok_rh, ReadHistory = pcall(require, "readhistory")
+    if ok_rh and ReadHistory and ReadHistory.hist then
+        for _, entry in ipairs(ReadHistory.hist) do
+            if entry.title == title and entry.file then
+                local ok_ds, DocSettings = pcall(require, "docsettings")
+                if ok_ds and DocSettings then
+                    local ok_open, ds = pcall(DocSettings.open, entry.file)
+                    if ok_open and ds then
+                        local ok_hl, hl = pcall(function() return ds:readSetting("highlight") end)
+                        if ok_hl and type(hl) == "table" then
+                            for _, h in pairs(hl) do
+                                if type(h) == "table" then
+                                    anno = anno + 1
+                                    local n = h.note
+                                    if n and tostring(n) ~= "" then
+                                        note = note + 1
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                break
+            end
+        end
+    end
+    _anno_note_cache[title] = { anno = anno, note = note }
+    return anno, note
+end
+
 function InkStain:readStats(range, force_heatmap, book_limit)
     -- 书单上限：统计界面可传更大的 book_limit；壁纸/默认沿用设置 top_n（封顶5）
     local book_cap = book_limit and math.max(1, math.floor(book_limit))
@@ -1250,38 +1289,64 @@ function InkStain:readStats(range, force_heatmap, book_limit)
         result.heatmap_end = heat_end
     end
 
+    -- 为每本书补充标注/笔记数量（来自各书 docsettings 的 highlight 设置）
+    for _, b in ipairs(result.books) do
+        local a, n = getBookAnnoNote(b.title)
+        b.anno_count = a
+        b.note_count = n
+    end
+
     return result
 end
+
+-- 字体对象缓存：避免每次绘制文字都重新走“自定义→basename→内置→系统”的回退链
+-- （尤其是内置 24MB 字体，重复加载很慢）。键为 “字体名@字号”，切换字体/字号后自动按新键重取。
+local _font_cache = {}
 
 local function getFontFace(size, font_name)
     if not Font then Font = require("ui/font") end
     local sz = math.max(8, math.floor(size))
     local fname = font_name or _active_font_name
+    local cache_key = (fname or "") .. "@" .. sz
+    local cached = _font_cache[cache_key]
+    if cached ~= nil then
+        return cached  -- 命中缓存（含 nil：极端加载失败时不再反复回退/打日志）
+    end
+    local face
     -- 优先使用用户自定义字体
     if fname and fname ~= "" then
         -- Font:getFace 支持字体族名（如 "Noto Sans CJK SC"）或文件名（如 "NotoSansCJKsc-Regular.otf"）
         -- 不支持完整文件路径，如果传入路径则提取文件名
-        local ok_face, face = pcall(Font.getFace, Font, fname, sz)
-        if ok_face and face then return face end
-        -- 尝试从路径提取文件名
-        local basename = fname:match("([^/]+)$")
-        if basename and basename ~= fname then
-            local ok2, face2 = pcall(Font.getFace, Font, basename, sz)
-            if ok2 and face2 then return face2 end
+        local ok_face, f = pcall(Font.getFace, Font, fname, sz)
+        if ok_face and f then
+            face = f
+        else
+            -- 尝试从路径提取文件名
+            local basename = fname:match("([^/]+)$")
+            if basename and basename ~= fname then
+                local ok2, f2 = pcall(Font.getFace, Font, basename, sz)
+                if ok2 and f2 then face = f2 end
+            end
         end
-        logger.warn("墨痕壁纸：自定义字体加载失败，回退到内置字体", fname)
+        if not face then
+            logger.warn("墨痕壁纸：自定义字体加载失败，回退到内置字体", fname)
+        end
     end
     -- 回退到内置字体
-    local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
-    if lfs.attributes(font_dest, "mode") == "file" then
-        local ok_builtin, face_builtin = pcall(Font.getFace, Font, PLUGIN_FONT_NAME, sz)
-        if ok_builtin and face_builtin then return face_builtin end
+    if not face then
+        local font_dest = FontList.fontdir .. "/" .. PLUGIN_FONT_NAME
+        if lfs.attributes(font_dest, "mode") == "file" then
+            local ok_builtin, face_builtin = pcall(Font.getFace, Font, PLUGIN_FONT_NAME, sz)
+            if ok_builtin and face_builtin then face = face_builtin end
+        end
     end
     -- 最终回退到系统字体
-    local ok_sys, face_sys = pcall(Font.getFace, Font, "cfont", sz)
-    if ok_sys and face_sys then return face_sys end
-    -- 极端情况：返回 nil 让调用方处理
-    return nil
+    if not face then
+        local ok_sys, face_sys = pcall(Font.getFace, Font, "cfont", sz)
+        if ok_sys and face_sys then face = face_sys end
+    end
+    _font_cache[cache_key] = face
+    return face
 end
 
 local function drawText(bb, text, x, y, size, bold, max_width, align, color)
@@ -1335,14 +1400,16 @@ local function drawImage(bb, path, x, y, size)
     return true
 end
 
-local function drawBoxText(bb, text, x, y, width, size, bold, align)
+local function drawBoxText(bb, text, x, y, width, size, bold, align, fg, bg)
+    fg = fg or Blitbuffer.COLOR_BLACK
+    bg = bg or Blitbuffer.COLOR_WHITE
     if not TextBoxWidget then TextBoxWidget = require("ui/widget/textboxwidget") end
     local widget = TextBoxWidget:new{
         text = tostring(text or ""),
         face = getFontFace(size),
         bold = bold and true or false,
-        fgcolor = Blitbuffer.COLOR_BLACK,
-        bgcolor = Blitbuffer.COLOR_WHITE,
+        fgcolor = fg,
+        bgcolor = bg,
         width = math.floor(width),
         alignment = align or "left",
         height_overflow_show_ellipsis = true,
@@ -1503,9 +1570,9 @@ local function drawPseudoQR(bb, x, y, size, seed)
     local actual = cell * cells
     drawRect(bb, x, y, actual, actual, Blitbuffer.COLOR_WHITE)
     local function finder(fx, fy)
-        drawRect(bb, x + fx * cell, y + fy * cell, 7 * cell, 7 * cell)
+        drawRect(bb, x + fx * cell, y + fy * cell, 7 * cell, 7 * cell, Blitbuffer.COLOR_BLACK)
         drawRect(bb, x + (fx + 1) * cell, y + (fy + 1) * cell, 5 * cell, 5 * cell, Blitbuffer.COLOR_WHITE)
-        drawRect(bb, x + (fx + 2) * cell, y + (fy + 2) * cell, 3 * cell, 3 * cell)
+        drawRect(bb, x + (fx + 2) * cell, y + (fy + 2) * cell, 3 * cell, 3 * cell, Blitbuffer.COLOR_BLACK)
     end
     finder(0, 0)
     finder(14, 0)
@@ -1517,7 +1584,7 @@ local function drawPseudoQR(bb, x, y, size, seed)
             if not in_finder then
                 local s = seed:byte((row + col) % #seed + 1) or 1
                 if ((row * 7 + col * 11 + s) % 5) < 2 then
-                    drawRect(bb, x + col * cell, y + row * cell, cell, cell)
+                    drawRect(bb, x + col * cell, y + row * cell, cell, cell, fg)
                 end
             end
         end
@@ -1684,13 +1751,13 @@ local function drawCustomTitle(bb, x_right, y, scale, lang, T, brand_text)
         else
             en_title = T("title_cn1") .. " " .. T("title_cn2")
         end
-        local main_w = TextWidget:new{ text = en_title, face = getFontFace(main_size), bold = true }
+        local main_w = TextWidget:new{ text = en_title, face = getFontFace(main_size), bold = true , fgcolor = Blitbuffer.COLOR_BLACK}
         main_w:updateSize()
         local total_w = main_w:getSize().w
         local total_h = main_w:getSize().h
         local sub_w
         if not custom then
-            sub_w = TextWidget:new{ text = T("title_en"), face = getFontFace(sub_size), bold = false }
+            sub_w = TextWidget:new{ text = T("title_en"), face = getFontFace(sub_size), bold = false , fgcolor = Blitbuffer.COLOR_BLACK}
             sub_w:updateSize()
             total_w = math.max(total_w, sub_w:getSize().w)
             total_h = total_h + math.max(1, math.floor(2 * scale)) + sub_w:getSize().h
@@ -1709,7 +1776,7 @@ local function drawCustomTitle(bb, x_right, y, scale, lang, T, brand_text)
     -- 中文标题：默认“墨 + 痕 + ink stain”；自定义字样则整体渲染
     if custom then
         local cn_size = math.max(32, math.min(48, math.floor(42 * scale)))
-        local main_w = TextWidget:new{ text = brand_text, face = getFontFace(cn_size), bold = true }
+        local main_w = TextWidget:new{ text = brand_text, face = getFontFace(cn_size), bold = true , fgcolor = Blitbuffer.COLOR_BLACK}
         main_w:updateSize()
         local total_w = main_w:getSize().w
         local start_x = math.floor(x_right - total_w)
@@ -1722,15 +1789,15 @@ local function drawCustomTitle(bb, x_right, y, scale, lang, T, brand_text)
     local cn_size = math.max(32, math.min(48, math.floor(42 * scale)))
     local en_size = math.max(10, math.floor(cn_size * 0.32))
 
-    local mo_w = TextWidget:new{ text = T("title_cn1"), face = getFontFace(cn_size), bold = true }
+    local mo_w = TextWidget:new{ text = T("title_cn1"), face = getFontFace(cn_size), bold = true , fgcolor = Blitbuffer.COLOR_BLACK}
     mo_w:updateSize()
     local mo_w_w, mo_w_h = mo_w:getSize().w, mo_w:getSize().h
 
-    local hen_w = TextWidget:new{ text = T("title_cn2"), face = getFontFace(cn_size), bold = true }
+    local hen_w = TextWidget:new{ text = T("title_cn2"), face = getFontFace(cn_size), bold = true , fgcolor = Blitbuffer.COLOR_BLACK}
     hen_w:updateSize()
     local hen_w_w, hen_w_h = hen_w:getSize().w, hen_w:getSize().h
 
-    local en_w = TextWidget:new{ text = T("title_en"), face = getFontFace(en_size), bold = false }
+    local en_w = TextWidget:new{ text = T("title_en"), face = getFontFace(en_size), bold = false , fgcolor = Blitbuffer.COLOR_BLACK}
     en_w:updateSize()
     local en_w_w, en_w_h = en_w:getSize().w, en_w:getSize().h
 
@@ -1833,11 +1900,13 @@ function InkStain:buildPng(stats)
     local scale = math.min(w / 600, h / 800)
     local margin_x = math.max(20, math.floor(w * 0.05))
     local margin_y = math.max(18, math.floor(h * 0.035))
-    local title_size = math.max(32, math.min(48, math.floor(42 * scale)))
-    local large = math.max(20, math.min(30, math.floor(26 * scale)))
-    local normal = math.max(11, math.min(15, math.floor(13 * scale)))
-    local small = math.max(9, math.min(12, math.floor(10 * scale)))
-    local tiny = math.max(8, math.min(10, math.floor(8 * scale)))
+    -- 轻量模式：字号下限同步下调，避免低分辨率下文字相对过大、与固定间距不匹配导致元素重叠
+    local lmf = self.settings.low_memory_mode and 0.72 or 1
+    local title_size = math.max(math.floor(32 * lmf), math.min(48, math.floor(42 * scale)))
+    local large = math.max(math.floor(20 * lmf), math.min(30, math.floor(26 * scale)))
+    local normal = math.max(math.floor(11 * lmf), math.min(15, math.floor(13 * scale)))
+    local small = math.max(math.floor(9 * lmf), math.min(12, math.floor(10 * scale)))
+    local tiny = math.max(math.floor(8 * lmf), math.min(10, math.floor(8 * scale)))
     local line_w = 1
     local content_w = w - margin_x * 2
 
@@ -1875,14 +1944,19 @@ function InkStain:buildPng(stats)
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
     local table_header_y = y + math.max(8, math.floor(8 * scale))
+    -- 列布局：基于实际字号动态计算列起点与宽度，避免低分辨率下固定间距过小导致列重叠
+    local col_gap = math.max(6, math.floor(8 * scale))
     local x_no = margin_x
-    local x_title = margin_x + math.floor(76 * scale)
-    local x_qty = w - margin_x - math.floor(68 * scale)
-    local x_unit = w - margin_x - math.floor(18 * scale)
-    local title_w = math.max(120, x_qty - x_title - 20 * scale)
+    local no_text_w = math.floor(normal * 3.0)  -- “NO.99” 估算宽度
+    local x_title = margin_x + no_text_w + col_gap
+    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
+    local num_col_w = math.floor(normal * 3.0)  -- 数字列估算宽度（最多约 4 位）
+    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
+    local x_anno = x_note - num_col_w - col_gap
+    local title_w = math.max(40, x_anno - x_title - col_gap)
     drawText(bb, T("col_category"), x_no, table_header_y, small, false)
-    drawText(bb, T("col_qty"), x_qty, table_header_y, small, false, nil, "center")
-    drawText(bb, T("col_unit"), x_unit, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_anno"), x_anno, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_note"), x_note, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -1937,8 +2011,8 @@ function InkStain:buildPng(stats)
             local meta_y = y + math.max(s.h, 18)
             drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
             drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, "1", x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, T("unit_book"), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.anno_count or 0), x_anno, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_note, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
@@ -4248,6 +4322,9 @@ function InkStain:addToMainMenu(menu_items)
                             },
                         },
                     },
+                    --[[
+                    -- 低内存模式入口已关闭（保留实现逻辑与设置项 low_memory_mode，不删除代码）。
+                    -- 如后续需要重新开放，取消此块注释即可恢复菜单项。
                     {
                         text = _("轻量模式（低内存设备）"),
                         checked_func = function() return self.settings.low_memory_mode end,
@@ -4261,6 +4338,7 @@ function InkStain:addToMainMenu(menu_items)
                             })
                         end,
                     },
+                    --]]
                     {
                         text = _("软件更新"),
                         sub_item_table_func = function()
@@ -4477,12 +4555,14 @@ function InkStain:renderStatsScreen(bb)
     local table_header_y = y + math.max(8, math.floor(8 * scale))
     local x_no = margin_x
     local x_title = margin_x + math.floor(76 * scale)
-    local x_qty = w - margin_x - math.floor(68 * scale)
-    local x_unit = w - margin_x - math.floor(18 * scale)
-    local title_w = math.max(120, x_qty - x_title - 20 * scale)
+    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
+    local num_col_w = math.floor(normal * 3.0)
+    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
+    local x_anno = x_note - num_col_w - math.floor(20 * scale)
+    local title_w = math.max(120, x_anno - x_title - 20 * scale)
     drawText(bb, L("col_category", "品类"), x_title, table_header_y, small, false)
-    drawText(bb, L("col_qty", "数量"), x_qty, table_header_y, small, false, nil, "center")
-    drawText(bb, L("col_unit", "单位"), x_unit, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_anno", "标注"), x_anno, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_note", "笔记"), x_note, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -4529,8 +4609,8 @@ function InkStain:renderStatsScreen(bb)
             local meta_y = y + math.max(s.h, 18)
             drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
             drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, "1", x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, L("unit_book", "本"), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.anno_count or 0), x_anno, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_note, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
