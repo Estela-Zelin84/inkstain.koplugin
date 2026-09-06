@@ -42,6 +42,12 @@ msgstr "數量"
 msgid "col_unit"
 msgstr "單位"
 
+msgid "col_anno"
+msgstr "標註"
+
+msgid "col_note"
+msgstr "筆記"
+
 # 書籍行標籤
 msgid "author"
 msgstr "作者："
