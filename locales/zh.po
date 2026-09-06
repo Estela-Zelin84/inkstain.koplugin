@@ -45,6 +45,12 @@ msgstr "数量"
 msgid "col_unit"
 msgstr "单位"
 
+msgid "col_anno"
+msgstr "标注"
+
+msgid "col_note"
+msgstr "笔记"
+
 # 书籍行标签
 msgid "author"
 msgstr "作者："
