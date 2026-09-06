@@ -4445,13 +4445,17 @@ function InkStain:_registerNavigationEntries()
 
     -- KOReader 全局 Dispatcher 动作注册：供「设置 → 手势」及 ZenOS 导航栏「添加操作」绑定。
     -- 关键点：
-    --   * general = true —— 与 ZenOS 自带动作结构一致（ZenOS 补丁过的 Dispatcher 选择器按
-    --     general/reader 分区，缺此标志的动作在列表/添加流程中会被错误处理导致 KOReader 闪退）。
+    --   * general = true —— 该动作属于「通用」分区，会出现在手势分配的 General 列表里。
     --   * callback 直接调出统计面板 —— 自包含，不依赖外部事件处理器，执行最可靠。
+    --   * 必须用「冒号」调用 registerAction（见下方），这是修「设置手势闪退」的根因。
     pcall(function()
         local ok_disp, Dispatcher = pcall(require, "dispatcher")
         if ok_disp and Dispatcher and type(Dispatcher.registerAction) == "function" then
-            Dispatcher.registerAction("inkstain_stats", {
+            -- 注意：registerAction 是「冒号方法」（function Dispatcher:registerAction(name, value)）。
+            -- 必须用冒号调用，否则参数整体错位（self 收到动作 id、name 收到动作表、value 为 nil），
+            -- 会把一个没有 settingsList 条目的表塞进 dispatcher_menu_order；之后「设置手势」遍历它时
+            -- 执行 settingsList[k][section] 索引 nil，导致 KOReader 闪退。
+            Dispatcher:registerAction("inkstain_stats", {
                 title = entry_label,
                 category = "none",
                 general = true,
