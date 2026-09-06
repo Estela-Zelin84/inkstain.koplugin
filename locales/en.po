@@ -45,6 +45,12 @@ msgstr "Qty"
 msgid "col_unit"
 msgstr "Unit"
 
+msgid "col_anno"
+msgstr "Marks"
+
+msgid "col_note"
+msgstr "Notes"
+
 # Book row labels
 msgid "author"
 msgstr "Author: "
