@@ -1944,19 +1944,14 @@ function InkStain:buildPng(stats)
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
     local table_header_y = y + math.max(8, math.floor(8 * scale))
-    -- 列布局：基于实际字号动态计算列起点与宽度，避免低分辨率下固定间距过小导致列重叠
-    local col_gap = math.max(6, math.floor(8 * scale))
     local x_no = margin_x
-    local no_text_w = math.floor(normal * 3.0)  -- “NO.99” 估算宽度
-    local x_title = margin_x + no_text_w + col_gap
-    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
-    local num_col_w = math.floor(normal * 3.0)  -- 数字列估算宽度（最多约 4 位）
-    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
-    local x_anno = x_note - num_col_w - col_gap
-    local title_w = math.max(40, x_anno - x_title - col_gap)
+    local x_title = margin_x + math.floor(76 * scale)
+    local x_qty = w - margin_x - math.floor(68 * scale)
+    local x_unit = w - margin_x - math.floor(18 * scale)
+    local title_w = math.max(120, x_qty - x_title - 20 * scale)
     drawText(bb, T("col_category"), x_no, table_header_y, small, false)
-    drawText(bb, T("col_anno"), x_anno, table_header_y, small, false, nil, "center")
-    drawText(bb, T("col_note"), x_note, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_anno"), x_qty, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_note"), x_unit, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -2011,8 +2006,8 @@ function InkStain:buildPng(stats)
             local meta_y = y + math.max(s.h, 18)
             drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
             drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_anno, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_note, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
@@ -4555,14 +4550,12 @@ function InkStain:renderStatsScreen(bb)
     local table_header_y = y + math.max(8, math.floor(8 * scale))
     local x_no = margin_x
     local x_title = margin_x + math.floor(76 * scale)
-    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
-    local num_col_w = math.floor(normal * 3.0)
-    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
-    local x_anno = x_note - num_col_w - math.floor(20 * scale)
-    local title_w = math.max(120, x_anno - x_title - 20 * scale)
+    local x_qty = w - margin_x - math.floor(68 * scale)
+    local x_unit = w - margin_x - math.floor(18 * scale)
+    local title_w = math.max(120, x_qty - x_title - 20 * scale)
     drawText(bb, L("col_category", "品类"), x_title, table_header_y, small, false)
-    drawText(bb, L("col_anno", "标注"), x_anno, table_header_y, small, false, nil, "center")
-    drawText(bb, L("col_note", "笔记"), x_note, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_anno", "标注"), x_qty, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_note", "笔记"), x_unit, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -4609,8 +4602,8 @@ function InkStain:renderStatsScreen(bb)
             local meta_y = y + math.max(s.h, 18)
             drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
             drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_anno, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_note, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
