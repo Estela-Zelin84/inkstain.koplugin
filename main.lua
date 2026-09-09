@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.0fix"
+local PLUGIN_VERSION = "3.9.0fix2"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -297,6 +297,31 @@ function InkStain:saveSettings()
     end
 end
 
+--- 检测觅阅（Miuread）是否在后台活跃（伪锁屏/下载继续/阅读器终结器等）
+--  当 Miuread 后台任务运行时，应避免触发壁纸生成，防止资源竞争导致
+--  休眠/唤醒卡顿、下载变慢等问题。
+function InkStain:_isMiureadBackgroundActive()
+    -- 优先检查 Miuread 的伪锁屏/后台电源管理状态
+    local ok_pl, pl = pcall(require, "miuread.pseudo_lockscreen")
+    if ok_pl and pl and type(pl.active) == "function" then
+        local ok_active, active = pcall(pl.active, pl)
+        if ok_active and active == true then return true end
+    end
+    -- 兼容旧版：检查 background_power controller
+    local ok_bp, bp = pcall(require, "miuread.background_power.controller")
+    if ok_bp and bp and type(bp.active) == "function" then
+        local ok_active, active = pcall(bp.active, bp)
+        if ok_active and active == true then return true end
+    end
+    -- 检查 suspend_work_lease 是否有租约持有
+    local ok_sl, sl = pcall(require, "miuread.suspend_work_lease")
+    if ok_sl and sl and type(sl.active) == "function" then
+        local ok_active, active = pcall(sl.active, sl)
+        if ok_active and active == true then return true end
+    end
+    return false
+end
+
 --- 周期性静默刷新壁纸（设备唤醒时按 refresh_interval 执行）
 --  替代原休眠前生成模式，避免休眠/唤醒时的卡顿感
 function InkStain:_stopPeriodicRefresh()
@@ -320,6 +345,12 @@ function InkStain:_schedulePeriodicRefresh()
             self:_schedulePeriodicRefresh()
             return
         end
+        -- 觅阅后台活跃时跳过：避免与下载/同步等后台任务竞争 CPU/IO，
+        -- 防止休眠响应慢、唤醒卡顿等问题。等觅阅后台任务结束后再生成。
+        if self:_isMiureadBackgroundActive() then
+            self:_schedulePeriodicRefresh()
+            return
+        end
         -- 省电：数据未变则跳过本次重绘。判断依据：
         --   1) 无设置变更（_wallpaper_dirty）；2) 已生成过至少一次；3) 阅读数据库修改时间未变。
         -- 空闲（无新阅读）时整次“读库+全屏渲染+写PNG”都省掉，近乎零耗电。
@@ -340,6 +371,8 @@ function InkStain:_schedulePeriodicRefresh()
         -- 3.5.8：用 nextTick 延迟生成，避免阻塞 UI 线程
         UIManager:nextTick(function()
             if generation ~= (tonumber(self._periodic_refresh_generation) or 0) then return end
+            -- 再次检查觅阅后台状态，防止 nextTick 排队期间状态变化
+            if self:_isMiureadBackgroundActive() then return end
             self:generate(true)
         end)
         self:_schedulePeriodicRefresh()
@@ -348,7 +381,11 @@ end
 
 --- 设备唤醒时重新调度周期刷新。
 function InkStain:onResume()
-    self:_schedulePeriodicRefresh()
+    -- 唤醒后延迟 5 秒再启动周期刷新，避免与系统/其他插件的唤醒恢复逻辑
+    -- （如 WiFi 重连、觅阅下载恢复等）竞争资源，造成唤醒后卡顿。
+    UIManager:scheduleIn(5, function()
+        self:_schedulePeriodicRefresh()
+    end)
     -- 3.5.8：移除 onResume 中的 _scheduleAutoUpdateCheck 调用。
     -- 唤醒后立即调度 OTA 检查会加载重模块，造成唤醒后卡顿。
 end
@@ -1944,14 +1981,18 @@ function InkStain:buildPng(stats)
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
     local table_header_y = y + math.max(8, math.floor(8 * scale))
+    -- 列布局：保留“标注 / 笔记”两列（数字，居中），标题列宽按剩余空间动态计算，避免重叠
+    local col_gap = math.max(6, math.floor(8 * scale))
     local x_no = margin_x
-    local x_title = margin_x + math.floor(76 * scale)
-    local x_qty = w - margin_x - math.floor(68 * scale)
-    local x_unit = w - margin_x - math.floor(18 * scale)
-    local title_w = math.max(120, x_qty - x_title - 20 * scale)
+    local no_text_w = math.floor(normal * 3.0)  -- “NO.99” 估算宽度
+    local x_title = margin_x + no_text_w + col_gap
+    local num_col_w = math.floor(normal * 3.0)  -- 数字列估算宽度（最多约 4 位）
+    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
+    local x_anno = x_note - num_col_w - col_gap
+    local title_w = math.max(40, x_anno - x_title - col_gap)
     drawText(bb, T("col_category"), x_no, table_header_y, small, false)
-    drawText(bb, T("col_anno"), x_qty, table_header_y, small, false, nil, "center")
-    drawText(bb, T("col_note"), x_unit, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_anno"), x_anno, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_note"), x_note, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -1966,7 +2007,10 @@ function InkStain:buildPng(stats)
     local chart_top = h - footer_h - chart_h - math.max(28, math.floor(28 * scale)) - chart_shift_up
     local table_bottom = chart_top - math.max(44, math.floor(44 * scale))
     local rows_top = y + math.max(8, math.floor(8 * scale))
-    local min_row_h = math.max(56, math.floor(58 * scale))
+    local meta_gap = math.max(2, math.floor(3 * scale))
+    -- 行高按“标题 + 作者 + 进度”三行实际字号高度计算，避免固定行距小于字号行高导致行内文字垂直重叠
+    local content_row_h = math.floor(normal * 1.4) + 2 * (math.floor(tiny * 1.4) + meta_gap) + math.max(6, math.floor(6 * scale))
+    local min_row_h = math.max(56, math.floor(58 * scale), content_row_h)
     local max_rows_by_height = math.max(1, math.floor((table_bottom - rows_top) / min_row_h))
     local visible_rows = math.min(#stats.books, tonumber(self.settings.top_n) or 5, 5, max_rows_by_height)
     local row_h = min_row_h
@@ -2003,11 +2047,11 @@ function InkStain:buildPng(stats)
             end
             drawText(bb, no, x_no, y, normal, true)
             s = drawText(bb, truncate(book.title, 16), x_title, y, normal, true, title_w)
-            local meta_y = y + math.max(s.h, 18)
-            drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
-            drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            local meta_y = y + s.h + meta_gap
+            local meta_s = drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
+            drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + meta_s.h + meta_gap, tiny, false, title_w)
+            drawText(bb, tostring(book.anno_count or 0), x_anno, y, normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_note, y, normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
@@ -2020,14 +2064,12 @@ function InkStain:buildPng(stats)
     local chart_x = margin_x
 
     if is_heatmap and stats.heatmap_daily and #stats.heatmap_daily > 0 then
-        -- 热力图模式：格子铺满底部宽度（与 QR+条形码对齐），去掉图例
-        -- 标题左对齐，合计仍在同一行右对齐
-        -- 标题硬编码兜底：原版 po 文件没有 heatmap_title，T() 会返回空字符串导致标题不可见
+        -- 热力图模式：格子铺满底部宽度，标题在上方，月份标签在下方
         local title_y = chart_top - math.max(24, math.floor(24 * scale))
         local heat_title = T("heatmap_title")
         if not heat_title or heat_title == "" then
-            heat_title = (lang == "en") and "26-Week Reading Heatmap"
-                or (lang == "zh-HK" and "26週閱讀熱力圖" or "26周阅读热力图")
+            heat_title = (lang == "en") and "Reading Heatmap"
+                or (lang == "zh-HK" and "閱讀熱力圖" or "阅读热力图")
         end
         drawText(bb, heat_title, margin_x, title_y, normal, true)
         drawText(bb, T("total") .. formatDuration(stats.total_seconds, T), w - margin_x, title_y, normal, true, nil, "right")
@@ -2038,7 +2080,7 @@ function InkStain:buildPng(stats)
         local total_days = #stats.heatmap_daily
         local weeks = math.ceil((first_day_idx + total_days) / 7)
 
-        -- 优先按 QR+条形码的宽度铺满，必要时再按高度限制缩小
+        -- 优先按宽度铺满，必要时按高度缩小
         local gap = math.max(1, math.floor(1.5 * scale))
         local cell_size = math.floor((chart_w - gap * (weeks - 1)) / weeks)
         if cell_size < 2 then cell_size = 2 end
@@ -2063,13 +2105,17 @@ function InkStain:buildPng(stats)
         local actual_grid_h = cell_size * 7 + gap * 6
         -- 在 chart_w 内居中
         local grid_x = chart_x + math.floor((chart_w - actual_grid_w) / 2)
-        local grid_y = chart_top + math.floor((chart_h - actual_grid_h) / 2)
+        -- 垂直方向：偏上居中，给底部月份标签留空间
+        local label_space = math.max(14, math.floor(16 * scale))
+        local avail_h = chart_h - label_space
+        local grid_y = chart_top + math.floor((avail_h - actual_grid_h) / 2)
+        if grid_y < chart_top then grid_y = chart_top end
 
         -- 绘制热力图格子
         drawHeatmap(bb, stats.heatmap_daily, grid_x, grid_y, actual_grid_w, actual_grid_h)
 
-        -- 月份标签：紧挨格子下方，不再放得那么低
-        local label_y = grid_y + actual_grid_h + math.max(2, math.floor(2 * scale))
+        -- 月份标签：紧挨格子下方，用 small 字号确保可见
+        local label_y = grid_y + actual_grid_h + math.max(3, math.floor(4 * scale))
         local month_labels = {}
         local last_month = 0
         for i, day in ipairs(stats.heatmap_daily) do
@@ -2077,14 +2123,22 @@ function InkStain:buildPng(stats)
             if month ~= last_month then
                 local week_idx = math.floor((first_day_idx + i - 1) / 7)
                 local mx = grid_x + week_idx * (cell_size + gap) + cell_size / 2
-                table.insert(month_labels, { x = mx, label = tostring(month) .. (lang == "en" and "" or "月") })
+                local label_text
+                if lang == "en" then
+                    local month_names = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"}
+                    label_text = month_names[month] or tostring(month)
+                else
+                    label_text = tostring(month) .. "月"
+                end
+                table.insert(month_labels, { x = mx, label = label_text })
                 last_month = month
             end
         end
-        local month_step = math.max(1, math.floor(#month_labels / 4))
+        -- 月份标签密度控制：最多显示 6 个
+        local month_step = math.max(1, math.ceil(#month_labels / 6))
         for i, ml in ipairs(month_labels) do
             if (i - 1) % month_step == 0 or i == #month_labels then
-                drawText(bb, ml.label, ml.x, label_y, tiny, false, nil, "center")
+                drawText(bb, ml.label, ml.x, label_y, small, false, nil, "center")
             end
         end
     else
@@ -2344,12 +2398,17 @@ end
 function InkStain:onSuspend()
     -- 休眠时取消尚未开始/正在执行的自动更新检查，避免网络任务跨越休眠。
     self:_cancelAutoUpdateCheck("suspend")
+    -- 停止所有待执行的周期刷新任务，避免休眠时仍有壁纸生成在排队。
+    -- generation 自增后，所有已调度的回调都会因 generation 不匹配而自动跳过。
+    self:_stopPeriodicRefresh()
     -- 3.5.8：休眠时绝不生成壁纸——同步 generate() 会阻塞休眠流程，
     -- 导致设备"卡死"无法唤醒。壁纸应由 onCloseDocument / 周期定时器负责更新。
     -- 休眠时只做最轻量的事：确保屏保设置指向正确的文件。
     if not self.settings.auto_set_screensaver then return end
     if not self:shouldApplyInCurrentContext() then return end
     -- 确保屏保设置指向正确的文件（不做任何生成）
+    -- 注：isUsingInkStainScreensaver() 仅做内存中的设置读取比较，极轻量；
+    -- 仅当设置确实不对时才调用 applyScreensaverSettings()（含 flush）。
     if not self:isUsingInkStainScreensaver() then
         self:applyScreensaverSettings()
     end
@@ -2362,6 +2421,9 @@ function InkStain:onCloseDocument()
     -- OTA 自动检查仅在 init 时延迟调度一次，不在阅读过程中反复触发。
     if not self.settings.auto_refresh_on_suspend then return end
     if not self.settings.auto_set_screensaver then return end
+    -- 觅阅后台活跃时跳过：关闭文档后如果觅阅正在后台下载/同步，
+    -- 不触发壁纸生成，避免资源竞争。后续周期刷新会补上。
+    if self:_isMiureadBackgroundActive() then return end
     local now = os.time()
     -- 关闭文档时的刷新间隔短一些（300 秒），避免频繁翻页关闭时重复生成
     if now - (self.last_refresh_ts or 0) < 300 then return end
@@ -2371,6 +2433,8 @@ function InkStain:onCloseDocument()
     local gen = self._periodic_refresh_generation
     UIManager:scheduleIn(0.5, function()
         if gen ~= (tonumber(self._periodic_refresh_generation) or 0) then return end
+        -- 再次检查觅阅后台状态，防止 0.5 秒内状态变化
+        if self:_isMiureadBackgroundActive() then return end
         self:generate(true)
     end)
 end
@@ -4445,17 +4509,13 @@ function InkStain:_registerNavigationEntries()
 
     -- KOReader 全局 Dispatcher 动作注册：供「设置 → 手势」及 ZenOS 导航栏「添加操作」绑定。
     -- 关键点：
-    --   * general = true —— 该动作属于「通用」分区，会出现在手势分配的 General 列表里。
+    --   * general = true —— 与 ZenOS 自带动作结构一致（ZenOS 补丁过的 Dispatcher 选择器按
+    --     general/reader 分区，缺此标志的动作在列表/添加流程中会被错误处理导致 KOReader 闪退）。
     --   * callback 直接调出统计面板 —— 自包含，不依赖外部事件处理器，执行最可靠。
-    --   * 必须用「冒号」调用 registerAction（见下方），这是修「设置手势闪退」的根因。
     pcall(function()
         local ok_disp, Dispatcher = pcall(require, "dispatcher")
         if ok_disp and Dispatcher and type(Dispatcher.registerAction) == "function" then
-            -- 注意：registerAction 是「冒号方法」（function Dispatcher:registerAction(name, value)）。
-            -- 必须用冒号调用，否则参数整体错位（self 收到动作 id、name 收到动作表、value 为 nil），
-            -- 会把一个没有 settingsList 条目的表塞进 dispatcher_menu_order；之后「设置手势」遍历它时
-            -- 执行 settingsList[k][section] 索引 nil，导致 KOReader 闪退。
-            Dispatcher:registerAction("inkstain_stats", {
+            Dispatcher.registerAction("inkstain_stats", {
                 title = entry_label,
                 category = "none",
                 general = true,
@@ -4554,12 +4614,14 @@ function InkStain:renderStatsScreen(bb)
     local table_header_y = y + math.max(8, math.floor(8 * scale))
     local x_no = margin_x
     local x_title = margin_x + math.floor(76 * scale)
-    local x_qty = w - margin_x - math.floor(68 * scale)
-    local x_unit = w - margin_x - math.floor(18 * scale)
-    local title_w = math.max(120, x_qty - x_title - 20 * scale)
+    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
+    local num_col_w = math.floor(normal * 3.0)
+    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
+    local x_anno = x_note - num_col_w - math.floor(20 * scale)
+    local title_w = math.max(120, x_anno - x_title - 20 * scale)
     drawText(bb, L("col_category", "品类"), x_title, table_header_y, small, false)
-    drawText(bb, L("col_anno", "标注"), x_qty, table_header_y, small, false, nil, "center")
-    drawText(bb, L("col_note", "笔记"), x_unit, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_anno", "标注"), x_anno, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_note", "笔记"), x_note, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -4567,7 +4629,10 @@ function InkStain:renderStatsScreen(bb)
     local icon_h = math.floor(78 * scale)
     local list_end_max = h - margin_y - icon_h - math.max(30, math.floor(30 * scale))
     if list_end_max < y + 60 then list_end_max = y + 60 end
-    local min_row_h = math.max(48, math.floor(52 * scale))
+    local meta_gap = math.max(2, math.floor(3 * scale))
+    -- 行高按“标题 + 作者 + 进度”三行实际字号高度计算，避免固定行距小于字号行高导致行内文字垂直重叠
+    local content_row_h = math.floor(normal * 1.4) + 2 * (math.floor(tiny * 1.4) + meta_gap) + math.max(6, math.floor(6 * scale))
+    local min_row_h = math.max(48, math.floor(52 * scale), content_row_h)
     local rows_top = y + math.max(8, math.floor(8 * scale))
     local max_rows_by_height = math.max(1, math.floor((list_end_max - rows_top) / min_row_h))
     local visible_rows = math.min(#stats.books, 9, max_rows_by_height)
@@ -4603,11 +4668,11 @@ function InkStain:renderStatsScreen(bb)
             end
             drawText(bb, no, x_no, y, normal, true)
             s = drawText(bb, truncate(book.title, 16), x_title, y, normal, true, title_w)
-            local meta_y = y + math.max(s.h, 18)
-            drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
-            drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            local meta_y = y + s.h + meta_gap
+            local meta_s = drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
+            drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + meta_s.h + meta_gap, tiny, false, title_w)
+            drawText(bb, tostring(book.anno_count or 0), x_anno, y, normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_note, y, normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
