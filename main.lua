@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.0fix2"
+local PLUGIN_VERSION = "3.9.3"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -285,6 +285,60 @@ function InkStain:init()
     -- 3.5.8：移除 init 中的 _scheduleAutoUpdateCheck 调用。
     -- 启动后立即调度 OTA 检查会导致 ssl.https/json/sha256 等重模块在
     -- UI 尚未稳定时加载，造成启动卡顿。OTA 检查改为仅在用户主动操作时触发。
+
+    -- 3.9.3：Hook Screensaver.setup，确保屏保准备前设置正确。
+    -- Kindle 的休眠流程是先 setup+show 再广播 Suspend 事件，
+    -- 因此 onSuspend 中修复设置已经来不及。必须在 setup 之前就确保
+    -- screensaver_type 指向 InkStain 的 document_cover，否则用户安装的
+    -- 其他屏保补丁（如 book-receipt、dual-state）会临时覆盖设置，
+    -- 导致 InkStain 壁纸闪一下就被替换。
+    self:_hookScreensaverSetup()
+end
+
+--- Hook Screensaver.setup 以在屏保准备前强制确保 InkStain 设置
+--  Kindle 休眠顺序：intoScreenSaver → Screensaver:setup()+show() → beforeSuspend → Suspend 事件
+--  onSuspend 在屏保已经画完后才执行，修复设置来不及。
+--  此 hook 在 setup 最前面拦截，确保 auto_set_screensaver 启用时
+--  screensaver_type 始终为 document_cover 且指向 InkStain 输出文件。
+function InkStain:_hookScreensaverSetup()
+    if self._screensaver_hooked then return end
+    local ok, Screensaver = pcall(require, "ui/screensaver")
+    if not ok or not Screensaver or type(Screensaver.setup) ~= "function" then
+        logger.warn("[InkStain] Screensaver.setup hook 失败：无法加载 ui/screensaver")
+        return
+    end
+    self._screensaver_hooked = true
+    local orig_setup = Screensaver.setup
+    Screensaver.setup = function(ss_self, event, event_message)
+        -- 仅在 InkStain 自动接管屏保时才强制设置
+        local inst = _G.InkStainWallpaper
+        if inst and inst.settings and inst.settings.auto_set_screensaver then
+            if inst:shouldApplyInCurrentContext() then
+                local target = inst.output_file
+                local custom = inst:customOutputFile()
+                if inst.settings.wallpaper_save_only_custom and custom then
+                    target = custom
+                end
+                -- 强制确保 screensaver_type 和 document_cover 指向 InkStain
+                local current_type = G_reader_settings:readSetting("screensaver_type")
+                local current_cover = G_reader_settings:readSetting("screensaver_document_cover") or ""
+                if current_type ~= "document_cover" or current_cover ~= target then
+                    logger.info("[InkStain] 屏保设置被外部修改（type=", tostring(current_type),
+                        "），hook 中强制恢复为 document_cover")
+                    G_reader_settings:saveSetting("screensaver_type", "document_cover")
+                    G_reader_settings:saveSetting("screensaver_document_cover", target)
+                    G_reader_settings:makeTrue("screensaver_stretch_images")
+                    G_reader_settings:makeFalse("screensaver_show_message")
+                    G_reader_settings:saveSetting("screensaver_img_background", "white")
+                    if G_reader_settings.flush then
+                        G_reader_settings:flush()
+                    end
+                end
+            end
+        end
+        return orig_setup(ss_self, event, event_message)
+    end
+    logger.info("[InkStain] 已 hook Screensaver.setup，确保屏保前设置正确")
 end
 
 function InkStain:saveSettings()
@@ -1981,18 +2035,14 @@ function InkStain:buildPng(stats)
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
     local table_header_y = y + math.max(8, math.floor(8 * scale))
-    -- 列布局：保留“标注 / 笔记”两列（数字，居中），标题列宽按剩余空间动态计算，避免重叠
-    local col_gap = math.max(6, math.floor(8 * scale))
     local x_no = margin_x
-    local no_text_w = math.floor(normal * 3.0)  -- “NO.99” 估算宽度
-    local x_title = margin_x + no_text_w + col_gap
-    local num_col_w = math.floor(normal * 3.0)  -- 数字列估算宽度（最多约 4 位）
-    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
-    local x_anno = x_note - num_col_w - col_gap
-    local title_w = math.max(40, x_anno - x_title - col_gap)
+    local x_title = margin_x + math.floor(76 * scale)
+    local x_qty = w - margin_x - math.floor(68 * scale)
+    local x_unit = w - margin_x - math.floor(18 * scale)
+    local title_w = math.max(120, x_qty - x_title - 20 * scale)
     drawText(bb, T("col_category"), x_no, table_header_y, small, false)
-    drawText(bb, T("col_anno"), x_anno, table_header_y, small, false, nil, "center")
-    drawText(bb, T("col_note"), x_note, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_anno"), x_qty, table_header_y, small, false, nil, "center")
+    drawText(bb, T("col_note"), x_unit, table_header_y, small, false, nil, "center")
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -2007,10 +2057,7 @@ function InkStain:buildPng(stats)
     local chart_top = h - footer_h - chart_h - math.max(28, math.floor(28 * scale)) - chart_shift_up
     local table_bottom = chart_top - math.max(44, math.floor(44 * scale))
     local rows_top = y + math.max(8, math.floor(8 * scale))
-    local meta_gap = math.max(2, math.floor(3 * scale))
-    -- 行高按“标题 + 作者 + 进度”三行实际字号高度计算，避免固定行距小于字号行高导致行内文字垂直重叠
-    local content_row_h = math.floor(normal * 1.4) + 2 * (math.floor(tiny * 1.4) + meta_gap) + math.max(6, math.floor(6 * scale))
-    local min_row_h = math.max(56, math.floor(58 * scale), content_row_h)
+    local min_row_h = math.max(56, math.floor(58 * scale))
     local max_rows_by_height = math.max(1, math.floor((table_bottom - rows_top) / min_row_h))
     local visible_rows = math.min(#stats.books, tonumber(self.settings.top_n) or 5, 5, max_rows_by_height)
     local row_h = min_row_h
@@ -2047,11 +2094,11 @@ function InkStain:buildPng(stats)
             end
             drawText(bb, no, x_no, y, normal, true)
             s = drawText(bb, truncate(book.title, 16), x_title, y, normal, true, title_w)
-            local meta_y = y + s.h + meta_gap
-            local meta_s = drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
-            drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + meta_s.h + meta_gap, tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_anno, y, normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_note, y, normal, true, nil, "center")
+            local meta_y = y + math.max(s.h, 18)
+            drawText(bb, T("author") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
+            drawText(bb, T("progress") .. progress .. T("period_time") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
+            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
@@ -4614,14 +4661,13 @@ function InkStain:renderStatsScreen(bb)
     local table_header_y = y + math.max(8, math.floor(8 * scale))
     local x_no = margin_x
     local x_title = margin_x + math.floor(76 * scale)
-    -- 列布局：将原来的“数量/单位”两列替换为“标注/笔记”两列（均为数字，居中）
-    local num_col_w = math.floor(normal * 3.0)
-    local x_note = w - margin_x - math.floor(num_col_w * 0.4)
-    local x_anno = x_note - num_col_w - math.floor(20 * scale)
-    local title_w = math.max(120, x_anno - x_title - 20 * scale)
+    local x_qty = w - margin_x - math.floor(68 * scale)
+    local x_unit = w - margin_x - math.floor(18 * scale)
+    local title_w = math.max(120, x_qty - x_title - 20 * scale)
     drawText(bb, L("col_category", "品类"), x_title, table_header_y, small, false)
-    drawText(bb, L("col_anno", "标注"), x_anno, table_header_y, small, false, nil, "center")
-    drawText(bb, L("col_note", "笔记"), x_note, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_anno", "标注"), x_qty, table_header_y, small, false, nil, "center")
+    drawText(bb, L("col_note", "笔记"), x_unit, table_header_y, small, false, nil, "center")
+
     y = table_header_y + math.max(22, math.floor(22 * scale))
     drawLine(bb, margin_x, y, w - margin_x, y, line_w)
 
@@ -4629,10 +4675,7 @@ function InkStain:renderStatsScreen(bb)
     local icon_h = math.floor(78 * scale)
     local list_end_max = h - margin_y - icon_h - math.max(30, math.floor(30 * scale))
     if list_end_max < y + 60 then list_end_max = y + 60 end
-    local meta_gap = math.max(2, math.floor(3 * scale))
-    -- 行高按“标题 + 作者 + 进度”三行实际字号高度计算，避免固定行距小于字号行高导致行内文字垂直重叠
-    local content_row_h = math.floor(normal * 1.4) + 2 * (math.floor(tiny * 1.4) + meta_gap) + math.max(6, math.floor(6 * scale))
-    local min_row_h = math.max(48, math.floor(52 * scale), content_row_h)
+    local min_row_h = math.max(48, math.floor(52 * scale))
     local rows_top = y + math.max(8, math.floor(8 * scale))
     local max_rows_by_height = math.max(1, math.floor((list_end_max - rows_top) / min_row_h))
     local visible_rows = math.min(#stats.books, 9, max_rows_by_height)
@@ -4668,11 +4711,11 @@ function InkStain:renderStatsScreen(bb)
             end
             drawText(bb, no, x_no, y, normal, true)
             s = drawText(bb, truncate(book.title, 16), x_title, y, normal, true, title_w)
-            local meta_y = y + s.h + meta_gap
-            local meta_s = drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
-            drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + meta_s.h + meta_gap, tiny, false, title_w)
-            drawText(bb, tostring(book.anno_count or 0), x_anno, y, normal, true, nil, "center")
-            drawText(bb, tostring(book.note_count or 0), x_note, y, normal, true, nil, "center")
+            local meta_y = y + math.max(s.h, 18)
+            drawText(bb, L("author", "作者：") .. truncate(book.authors, 14), x_title, meta_y, tiny, false, title_w)
+            drawText(bb, L("progress", "进度：") .. progress .. L("period_time", "  本期：") .. formatDuration(book.seconds, T), x_title, meta_y + math.max(14, math.floor(14 * scale)), tiny, false, title_w)
+            drawText(bb, tostring(book.anno_count or 0), x_qty, y + math.floor(row_h * 0.1), normal, true, nil, "center")
+            drawText(bb, tostring(book.note_count or 0), x_unit, y + math.floor(row_h * 0.1), normal, true, nil, "center")
             y = y + row_h
         end
         if #stats.books > visible_rows then
