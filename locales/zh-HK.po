@@ -78,6 +78,16 @@ msgstr "合計："
 msgid "min_suffix"
 msgstr "分"
 
+# 熱力圖
+msgid "heatmap_title"
+msgstr "閱讀熱力圖"
+
+msgid "less"
+msgstr "少"
+
+msgid "more"
+msgstr "多"
+
 # 錯誤訊息
 msgid "err_read"
 msgstr "讀取統計失敗："
