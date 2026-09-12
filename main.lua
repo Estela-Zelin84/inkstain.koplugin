@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.3"
+local PLUGIN_VERSION = "3.9.5"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -944,42 +944,83 @@ local function matchProgress(progress_data, title)
     return nil
 end
 
--- 标注/笔记统计：KOReader 把每本书的“标注（高亮）”与“笔记”存在该书 docsettings 的
--- "highlight" 设置里（statistics 库不记录此项）。这里按书名在 ReadHistory 中定位文件路径后统计。
--- 标注数 = 高亮条目总数；笔记数 = 带非空 note 的高亮条目数。结果按书名缓存，避免每次刷新重读。
+-- 标注/笔记统计（回退方案）：KOReader 把每本书的标注存在该书 docsettings 里，
+-- 新版为 "annotations" 列表（高亮与笔记统一存放，item.drawer 存在即为一条标注，
+-- item.note 非空即为笔记）；旧版为 "highlight" 表（按页分组）。
+-- 注意：ReadHistory.hist 的条目只有 { time, file }，并没有 title 字段，
+-- 所以必须用「文件名（去扩展名）」与书名做归一化比对，否则永远匹配不到、恒为 0。
+-- 统计库 book 表的 highlights/notes 列可用时优先用库里的值，此函数仅作旧库回退。
 local _anno_note_cache = {}
-local function getBookAnnoNote(title)
-    if _anno_note_cache[title] then
-        return _anno_note_cache[title].anno, _anno_note_cache[title].note
-    end
+local function normalizeTitleKey(t)
+    if not t then return "" end
+    t = tostring(t):gsub("%s+", ""):gsub("[%p%c　]", "")
+    return t:lower()
+end
+
+local function countAnnoNoteFromDocSettings(ds)
     local anno, note = 0, 0
-    local ok_rh, ReadHistory = pcall(require, "readhistory")
-    if ok_rh and ReadHistory and ReadHistory.hist then
-        for _, entry in ipairs(ReadHistory.hist) do
-            if entry.title == title and entry.file then
-                local ok_ds, DocSettings = pcall(require, "docsettings")
-                if ok_ds and DocSettings then
-                    local ok_open, ds = pcall(DocSettings.open, entry.file)
-                    if ok_open and ds then
-                        local ok_hl, hl = pcall(function() return ds:readSetting("highlight") end)
-                        if ok_hl and type(hl) == "table" then
-                            for _, h in pairs(hl) do
-                                if type(h) == "table" then
-                                    anno = anno + 1
-                                    local n = h.note
-                                    if n and tostring(n) ~= "" then
-                                        note = note + 1
-                                    end
-                                end
-                            end
-                        end
+    -- 新版：annotations 列表
+    local ok_a, anns = pcall(function() return ds:readSetting("annotations") end)
+    if ok_a and type(anns) == "table" and #anns > 0 then
+        for _, item in ipairs(anns) do
+            if type(item) == "table" and item.drawer then
+                anno = anno + 1
+                local n = item.note
+                if n and tostring(n) ~= "" then note = note + 1 end
+            end
+        end
+        return anno, note
+    end
+    -- 旧版：highlight 表（按页分组，值是该页的高亮数组）
+    local ok_h, hl = pcall(function() return ds:readSetting("highlight") end)
+    if ok_h and type(hl) == "table" then
+        for _, page_hl in pairs(hl) do
+            if type(page_hl) == "table" then
+                for _, h in ipairs(page_hl) do
+                    if type(h) == "table" then
+                        anno = anno + 1
+                        local n = h.note
+                        if n and tostring(n) ~= "" then note = note + 1 end
                     end
                 end
-                break
             end
         end
     end
-    _anno_note_cache[title] = { anno = anno, note = note }
+    return anno, note
+end
+
+local function getBookAnnoNote(title)
+    local key = normalizeTitleKey(title)
+    if key == "" then return 0, 0 end
+    if _anno_note_cache[key] then
+        return _anno_note_cache[key].anno, _anno_note_cache[key].note
+    end
+    local anno, note = 0, 0
+    local ok_rh, ReadHistory = pcall(require, "readhistory")
+    if ok_rh and ReadHistory and type(ReadHistory.hist) == "table" then
+        for _, entry in ipairs(ReadHistory.hist) do
+            local file = entry and entry.file
+            if file then
+                local base = file:match("([^/\\]+)$") or ""
+                local base_noext = base:gsub("%.[^%.]+$", "")
+                local matched = normalizeTitleKey(base_noext) == key
+                    or normalizeTitleKey(base) == key
+                    or (entry.title and normalizeTitleKey(entry.title) == key)
+                if matched then
+                    local ok_ds, DocSettings = pcall(require, "docsettings")
+                    if ok_ds and DocSettings then
+                        local ok_open, ds = pcall(DocSettings.open, file)
+                        if ok_open and ds then
+                            local ok_c, ca, cn = pcall(countAnnoNoteFromDocSettings, ds)
+                            if ok_c then anno, note = tonumber(ca) or 0, tonumber(cn) or 0 end
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    _anno_note_cache[key] = { anno = anno, note = note }
     return anno, note
 end
 
@@ -1113,6 +1154,41 @@ function InkStain:readStats(range, force_heatmap, book_limit)
                 })
             end
         end
+
+        -- 标注/笔记数量：直接读统计库 book 表的 highlights/notes 两列，按书名建立映射。
+        -- 说明：这两列由 KOReader statistics 插件维护（打开书籍/标注增删时同步，
+        -- 见 readerannotation:getNumberOfHighlightsAndNotes 与 statistics 的 onAnnotationsModified）。
+        -- 语义：highlights = 纯标注（无笔记）条数，notes = 带笔记的条数，
+        -- 因此面板「标注」= highlights + notes，「笔记」= notes（与 KOReader 自带统计口径一致）。
+        -- 这里查全库（不限于统计窗口），这样觅阅/微信读书来源的书单也能按书名匹配到。
+        -- 单独 pcall 执行：极旧的统计库可能没有这两列，失败时不影响主书单（后面走 docsettings 回退）。
+        pcall(function()
+            local anno_sql = [[
+                SELECT title,
+                       max(ifnull(highlights, 0)),
+                       max(ifnull(notes, 0))
+                FROM book
+                GROUP BY title;
+            ]]
+            local anno_rows = conn:exec(anno_sql)
+            if anno_rows then
+                local a_titles = anno_rows[1] or {}
+                local a_hl = anno_rows[2] or {}
+                local a_nt = anno_rows[3] or {}
+                local by_title = {}
+                for i, t in ipairs(a_titles) do
+                    local k = normalizeTitleKey(t)
+                    if k ~= "" then
+                        local n = tonumber(a_nt[i]) or 0
+                        by_title[k] = {
+                            anno = (tonumber(a_hl[i]) or 0) + n,
+                            note = n,
+                        }
+                    end
+                end
+                result.anno_note_by_title = by_title
+            end
+        end)
 
         -- 按书名去重聚合：同一本书可能在 KOReader 中有多个 id（多副本/反复导入）
         -- 合并规则：时长相加、页数取最大、进度页取最大、最后阅读时间取最新
@@ -1380,11 +1456,21 @@ function InkStain:readStats(range, force_heatmap, book_limit)
         result.heatmap_end = heat_end
     end
 
-    -- 为每本书补充标注/笔记数量（来自各书 docsettings 的 highlight 设置）
+    -- 为每本书补充标注/笔记数量：
+    --   1) 优先用统计库 book 表的 highlights/notes（readStats 里已按书名建好映射，与书单同源、最可靠）；
+    --   2) 统计库里没有该书名（或旧库没有这两列）时，回退去读 ReadHistory + docsettings。
+    --      回退路径有磁盘 I/O，只在缓存未命中时才走。
+    local anno_by_title = result.anno_note_by_title or {}
     for _, b in ipairs(result.books) do
-        local a, n = getBookAnnoNote(b.title)
-        b.anno_count = a
-        b.note_count = n
+        local m = anno_by_title[normalizeTitleKey(b.title)]
+        if m then
+            b.anno_count = m.anno
+            b.note_count = m.note
+        else
+            local a, n = getBookAnnoNote(b.title)
+            b.anno_count = a
+            b.note_count = n
+        end
     end
 
     return result
@@ -1485,7 +1571,12 @@ local function drawImage(bb, path, x, y, size)
     end
     -- 用 ImageWidget 绘制：透明像素会按 alpha 与底图（白底）混合，
     -- 避免直接 blitFrom 在墨水屏上把透明区域填成黑色。
-    local widget = ImageWidget:new{ image = image, alpha = true }
+    -- 关键：必须显式传 image_disposable = false。
+    -- ImageWidget 的 image_disposable 默认为 true，其 free() 会释放我们传入的 Blitbuffer；
+    -- 而这个 Blitbuffer 是 _logo_image_cache 中的复用缓存。一旦被释放，下一次生成壁纸
+    -- 再取出来绘制就是 use-after-free（读到已释放/被复用的内存），表现为
+    -- 「二维码/Logo 第一次正常，之后随机消失或变成花屏」。
+    local widget = ImageWidget:new{ image = image, alpha = true, image_disposable = false }
     widget:paintTo(bb, math.floor(x), math.floor(y))
     if widget.free then widget:free() end
     return true
@@ -2058,9 +2149,17 @@ function InkStain:buildPng(stats)
     local table_bottom = chart_top - math.max(44, math.floor(44 * scale))
     local rows_top = y + math.max(8, math.floor(8 * scale))
     local min_row_h = math.max(56, math.floor(58 * scale))
-    local max_rows_by_height = math.max(1, math.floor((table_bottom - rows_top) / min_row_h))
-    local visible_rows = math.min(#stats.books, tonumber(self.settings.top_n) or 5, 5, max_rows_by_height)
-    local row_h = min_row_h
+    local avail_h = table_bottom - rows_top
+    local max_rows_by_height = math.max(1, math.floor(avail_h / min_row_h))
+    local desired_rows = math.min(#stats.books, tonumber(self.settings.top_n) or 5, 5)
+    -- 如果默认行高放不下 desired_rows 行，缩小行高使其能放下（最低 36px）
+    local row_h
+    if max_rows_by_height >= desired_rows then
+        row_h = min_row_h
+    else
+        row_h = math.max(36, math.floor(avail_h / desired_rows))
+    end
+    local visible_rows = math.min(desired_rows, math.max(1, math.floor(avail_h / row_h)))
 
     y = rows_top
     if #stats.books == 0 then
@@ -4558,20 +4657,20 @@ function InkStain:_registerNavigationEntries()
     -- 关键点：
     --   * general = true —— 与 ZenOS 自带动作结构一致（ZenOS 补丁过的 Dispatcher 选择器按
     --     general/reader 分区，缺此标志的动作在列表/添加流程中会被错误处理导致 KOReader 闪退）。
-    --   * callback 直接调出统计面板 —— 自包含，不依赖外部事件处理器，执行最可靠。
+    --   * event = "InkStainShowStats" —— Dispatcher:execute 对 category="none" 的动作会
+    --     调 UIManager:sendEvent(Event:new(event))。若不设 event，则 Event:new(nil) 被发出，
+    --     无 handler 匹配，手势触发后什么也不会发生（不崩但不工作）。
+    --     设了 event 后，KOReader 会在当前顶层 widget 的事件链中寻找 onInkStainShowStats
+    --     handler；我们在文件底部定义了 InkStain:onInkStainShowStats() 来接收并调出统计面板。
+    --   * 必须用「冒号」调用 registerAction，这是修「设置手势/快捷键闪退」的根因。
     pcall(function()
         local ok_disp, Dispatcher = pcall(require, "dispatcher")
         if ok_disp and Dispatcher and type(Dispatcher.registerAction) == "function" then
-            Dispatcher.registerAction("inkstain_stats", {
+            Dispatcher:registerAction("inkstain_stats", {
+                event = "InkStainShowStats",
                 title = entry_label,
                 category = "none",
                 general = true,
-                callback = function()
-                    local inst = rawget(_G, "InkStainWallpaper")
-                    if inst and type(inst.showStatsScreen) == "function" then
-                        inst:showStatsScreen()
-                    end
-                end,
             })
             logger.info("[InkStain] Dispatcher 入口已注册（手势/导航栏可调出统计面板）")
         end
@@ -4677,9 +4776,17 @@ function InkStain:renderStatsScreen(bb)
     if list_end_max < y + 60 then list_end_max = y + 60 end
     local min_row_h = math.max(48, math.floor(52 * scale))
     local rows_top = y + math.max(8, math.floor(8 * scale))
-    local max_rows_by_height = math.max(1, math.floor((list_end_max - rows_top) / min_row_h))
-    local visible_rows = math.min(#stats.books, 9, max_rows_by_height)
-    local row_h = min_row_h
+    local avail_h = list_end_max - rows_top
+    local max_rows_by_height = math.max(1, math.floor(avail_h / min_row_h))
+    local desired_rows = math.min(#stats.books, 9)
+    -- 如果默认行高放不下 desired_rows 行，缩小行高使其能放下（最低 32px）
+    local row_h
+    if max_rows_by_height >= desired_rows then
+        row_h = min_row_h
+    else
+        row_h = math.max(32, math.floor(avail_h / desired_rows))
+    end
+    local visible_rows = math.min(desired_rows, math.max(1, math.floor(avail_h / row_h)))
 
     y = rows_top
     if #stats.books == 0 then
@@ -4750,6 +4857,12 @@ function InkStain:renderStatsScreen(bb)
 
     return bb
 end
+
+-- Dispatcher 手势/快捷键触发时由 Event:new("InkStainShowStats") 调入
+function InkStain:onInkStainShowStats()
+    self:showStatsScreen()
+end
+
 function InkStain:showStatsScreen()
     if not StatsScreen then StatsScreen = require("stats_screen") end
     -- 统计窗口默认“年”
