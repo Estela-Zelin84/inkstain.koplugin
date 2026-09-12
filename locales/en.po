@@ -81,6 +81,16 @@ msgstr "Total: "
 msgid "min_suffix"
 msgstr "m"
 
+# Heatmap
+msgid "heatmap_title"
+msgstr "Reading Heatmap"
+
+msgid "less"
+msgstr "Less"
+
+msgid "more"
+msgstr "More"
+
 # Error messages
 msgid "err_read"
 msgstr "Failed to read stats: "
