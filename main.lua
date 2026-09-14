@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.5"
+local PLUGIN_VERSION = "3.9.6"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
