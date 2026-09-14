@@ -59,7 +59,6 @@ local DEFAULT_SETTINGS = {
     show_stains = false,  -- 墨水污渍效果（默认关闭，防止低性能设备卡顿）
     bg_mode = "white",  -- "white" 白底 / "image" 自定义图片
     bg_image_path = "",  -- 自定义背景图片路径
-    low_memory_mode = false,  -- 轻量模式：降低分辨率、跳过重计算（低内存设备推荐）
     chart_mode = "line",  -- "line" 折线图 / "heatmap" 热力图（最近半年）
     brand_text = "墨痕",  -- 锁屏壁纸与统计界面的品牌字样（可自定义，如书斋名）
     wallpaper_save_path = "",            -- 自定义壁纸保存目录（空=不额外保存；安卓上可设为共享目录如 Pictures，便于手动设为系统壁纸）
@@ -223,6 +222,13 @@ end
 
 function InkStain:init()
     self.settings = copyDefaults(G_reader_settings:readSetting(self.settings_key, {}))
+    -- 3.9.7：彻底移除已废弃的“低内存模式”。旧版本可能在设置里残留
+    -- low_memory_mode = true，导致渲染逻辑仍被触发。这里一次性清理该残留键。
+    if self.settings.low_memory_mode ~= nil then
+        self.settings.low_memory_mode = nil
+        G_reader_settings:saveSetting(self.settings_key, self.settings)
+        if G_reader_settings.flush then G_reader_settings:flush() end
+    end
     self.output_dir = DataStorage:getDataDir() .. "/screensaver/inkstain_png"
     self.output_file = self.output_dir .. "/inkstain_wallpaper.png"
     self.legacy_output_dir = DataStorage:getDataDir() .. "/screensaver/inkstain"
@@ -435,6 +441,13 @@ end
 
 --- 设备唤醒时重新调度周期刷新。
 function InkStain:onResume()
+    -- 3.9.6：唤醒后立即触发一次全屏刷新，解决墨水屏从深度休眠唤醒后
+    -- 屏保（壁纸）残影残留的问题——屏保退出时屏幕物理像素可能未正确刷新，
+    -- 导致一直停留在壁纸界面，直到翻页或重新锁屏才刷新。
+    -- 使用 "full" 模式（全屏闪刷）确保残影彻底清除，耗时短且不生成壁纸。
+    if self.settings.auto_set_screensaver and self:shouldApplyInCurrentContext() then
+        UIManager:setDirty(nil, "full")
+    end
     -- 唤醒后延迟 5 秒再启动周期刷新，避免与系统/其他插件的唤醒恢复逻辑
     -- （如 WiFi 重连、觅阅下载恢复等）竞争资源，造成唤醒后卡顿。
     UIManager:scheduleIn(5, function()
@@ -2016,12 +2029,6 @@ function InkStain:buildPng(stats)
         w, h = 824, 1200
     end
 
-    -- 轻量模式：降低分辨率以减少内存占用
-    if self.settings.low_memory_mode then
-        w = math.floor(w * 0.6)
-        h = math.floor(h * 0.6)
-    end
-
     local bb = Blitbuffer.new(w, h, Screen.bb:getType())
     bb:fill(Blitbuffer.COLOR_WHITE)
 
@@ -2052,8 +2059,8 @@ function InkStain:buildPng(stats)
         end
     end
 
-    -- 墨水污渍效果（轻量模式下跳过，减少绘制开销）
-    if self.settings.show_stains and not self.settings.low_memory_mode then
+    -- 墨水污渍效果
+    if self.settings.show_stains then
         -- 用日期作为种子，同一天的污渍一致
         local stain_seed = os.date("%Y%m%d") + (stats.total_seconds or 0) % 1000
         drawInkStains(bb, w, h, stain_seed, 1.0)
@@ -2082,13 +2089,11 @@ function InkStain:buildPng(stats)
     local scale = math.min(w / 600, h / 800)
     local margin_x = math.max(20, math.floor(w * 0.05))
     local margin_y = math.max(18, math.floor(h * 0.035))
-    -- 轻量模式：字号下限同步下调，避免低分辨率下文字相对过大、与固定间距不匹配导致元素重叠
-    local lmf = self.settings.low_memory_mode and 0.72 or 1
-    local title_size = math.max(math.floor(32 * lmf), math.min(48, math.floor(42 * scale)))
-    local large = math.max(math.floor(20 * lmf), math.min(30, math.floor(26 * scale)))
-    local normal = math.max(math.floor(11 * lmf), math.min(15, math.floor(13 * scale)))
-    local small = math.max(math.floor(9 * lmf), math.min(12, math.floor(10 * scale)))
-    local tiny = math.max(math.floor(8 * lmf), math.min(10, math.floor(8 * scale)))
+    local title_size = math.max(32, math.min(48, math.floor(42 * scale)))
+    local large = math.max(20, math.min(30, math.floor(26 * scale)))
+    local normal = math.max(11, math.min(15, math.floor(13 * scale)))
+    local small = math.max(9, math.min(12, math.floor(10 * scale)))
+    local tiny = math.max(8, math.min(10, math.floor(8 * scale)))
     local line_w = 1
     local content_w = w - margin_x * 2
 
@@ -2322,8 +2327,7 @@ function InkStain:buildPng(stats)
 
     local footer_y = chart_top + chart_h + math.max(26, math.floor(26 * scale))
     local qr_path = (self.path or "") .. "/assets/github_qr.png"
-    -- 轻量模式：跳过 QR 图片文件加载，直接用伪二维码绘制（减少 I/O 和内存）
-    if not self.settings.low_memory_mode and drawImage(bb, qr_path, margin_x, footer_y, qr_size) then
+    if drawImage(bb, qr_path, margin_x, footer_y, qr_size) then
         -- QR 图片加载成功
     else
         drawPseudoQR(bb, margin_x, footer_y, qr_size, os.date("%Y%m%d", stats.end_ts - 1))
@@ -4527,23 +4531,6 @@ function InkStain:addToMainMenu(menu_items)
                             },
                         },
                     },
-                    --[[
-                    -- 低内存模式入口已关闭（保留实现逻辑与设置项 low_memory_mode，不删除代码）。
-                    -- 如后续需要重新开放，取消此块注释即可恢复菜单项。
-                    {
-                        text = _("轻量模式（低内存设备）"),
-                        checked_func = function() return self.settings.low_memory_mode end,
-                        callback = function()
-                            self:toggleSetting("low_memory_mode")
-                            UIManager:show(InfoMessage:new{
-                                text = self.settings.low_memory_mode and
-                                    _("轻量模式已开启：降低分辨率并跳过墨水点，适合低内存设备。") or
-                                    _("轻量模式已关闭。"),
-                                timeout = 3,
-                            })
-                        end,
-                    },
-                    --]]
                     {
                         text = _("软件更新"),
                         sub_item_table_func = function()
