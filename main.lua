@@ -36,7 +36,7 @@ local util
 local ImageWidget
 local StatsScreen
 
-local PLUGIN_VERSION = "3.9.6"
+local PLUGIN_VERSION = "3.9.7"
 
 local Screen = Device.screen
 local PLUGIN_FONT_NAME = "huiwen_ming.otf"
@@ -336,12 +336,12 @@ function InkStain:_hookScreensaverSetup()
                     G_reader_settings:makeTrue("screensaver_stretch_images")
                     G_reader_settings:makeFalse("screensaver_show_message")
                     G_reader_settings:saveSetting("screensaver_img_background", "white")
-                    if G_reader_settings.flush then
-                        G_reader_settings:flush()
-                    end
                 end
             end
         end
+        -- 注：此处刻意不 flush。锁屏关键路径做同步落盘会拖慢锁屏；
+        -- KOReader 在 beforeSuspend 已统一 flush，且 Screensaver:setup
+        -- 紧接着读取的是内存中的设置，本 suspend 用新设置不受影响。
         return orig_setup(ss_self, event, event_message)
     end
     logger.info("[InkStain] 已 hook Screensaver.setup，确保屏保前设置正确")
@@ -441,12 +441,16 @@ end
 
 --- 设备唤醒时重新调度周期刷新。
 function InkStain:onResume()
-    -- 3.9.6：唤醒后立即触发一次全屏刷新，解决墨水屏从深度休眠唤醒后
-    -- 屏保（壁纸）残影残留的问题——屏保退出时屏幕物理像素可能未正确刷新，
-    -- 导致一直停留在壁纸界面，直到翻页或重新锁屏才刷新。
-    -- 使用 "full" 模式（全屏闪刷）确保残影彻底清除，耗时短且不生成壁纸。
-    if self.settings.auto_set_screensaver and self:shouldApplyInCurrentContext() then
-        UIManager:setDirty(nil, "full")
+    -- 3.9.7：唤醒重绘由 "full" 改为 "ui" 波形（替代 3.9.6 的 GU 全屏闪白）。
+    -- 背景：墨水屏从深度休眠唤醒后，屏保（壁纸）像素可能未正确刷新、停留在
+    -- 壁纸界面，需要一次重绘把不透明的阅读 UI 画回来。但 "full" 是全屏闪白
+    -- （GU），是唤醒可见耗时的主要来源（约 0.5–1s 闪白）。"ui" 波形同样能把
+    -- 阅读 UI 覆盖回屏幕、清除壁纸残影，但无全屏闪白、刷新更快，唤醒更跟手。
+    -- 如个别固件上出现残影，改回 "full" 即可。
+    -- 觅阅伪锁屏活跃时由觅阅负责唤醒显示，跳过本次刷新避免竞争。
+    if self.settings.auto_set_screensaver and self:shouldApplyInCurrentContext()
+       and not self:_isMiureadBackgroundActive() then
+        UIManager:setDirty(nil, "ui")
     end
     -- 唤醒后延迟 5 秒再启动周期刷新，避免与系统/其他插件的唤醒恢复逻辑
     -- （如 WiFi 重连、觅阅下载恢复等）竞争资源，造成唤醒后卡顿。
@@ -2431,7 +2435,10 @@ function InkStain:backupScreensaverSettings()
     self:saveSettings()
 end
 
-function InkStain:applyScreensaverSettings()
+function InkStain:applyScreensaverSettings(flush)
+    -- flush 默认 true：正常生成壁纸时（generate，设备清醒）需持久化设置；
+    -- 锁屏热路径（onSuspend）传 false，避免休眠设置同步落盘拖慢锁屏——
+    -- KOReader 在 beforeSuspend 已统一 flush，且 Screensaver:setup 读取内存设置。
     -- “仅自定义路径”模式下，KOReader 原生屏保也指向自定义保存文件
     local target = self.output_file
     local custom = self:customOutputFile()
@@ -2446,8 +2453,10 @@ function InkStain:applyScreensaverSettings()
     G_reader_settings:makeTrue("screensaver_stretch_images")
     G_reader_settings:makeFalse("screensaver_show_message")
     G_reader_settings:saveSetting("screensaver_img_background", "white")
-    if G_reader_settings.flush then
-        G_reader_settings:flush()
+    if flush ~= false then
+        if G_reader_settings.flush then
+            G_reader_settings:flush()
+        end
     end
 end
 
@@ -2558,9 +2567,10 @@ function InkStain:onSuspend()
     if not self:shouldApplyInCurrentContext() then return end
     -- 确保屏保设置指向正确的文件（不做任何生成）
     -- 注：isUsingInkStainScreensaver() 仅做内存中的设置读取比较，极轻量；
-    -- 仅当设置确实不对时才调用 applyScreensaverSettings()（含 flush）。
+    -- 仅当设置确实不对时才调用 applyScreensaverSettings(false)——锁屏热路径
+    -- 不落盘（flush=false），落盘交给 KOReader beforeSuspend 统一处理。
     if not self:isUsingInkStainScreensaver() then
-        self:applyScreensaverSettings()
+        self:applyScreensaverSettings(false)
     end
 end
 
